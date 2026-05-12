@@ -1,0 +1,28 @@
+{
+  "name": "mh-idle-rebuild",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "test:progression": "vitest run src/game-core/tests/progression-balance.test.ts src/game-core/tests/progression-flow.test.ts",
+    "test:watch": "vitest",
+    "report:progression": "node scripts/progression-report.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "break_infinity.js": "^2.2.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.0",
+    "vitest": "^1.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0"
+  }
+}
