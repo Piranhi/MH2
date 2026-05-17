@@ -108,10 +108,13 @@ export type InventoryItem = {
   instanceId: string;
   itemId: string;
   acquiredAt: number;
+  level: number;
+  locked: boolean;
 };
 
 export type TrainingState = {
   level: number;
+  progressSeconds: number;
 };
 
 export type CombatState = {
@@ -128,10 +131,12 @@ export type RewardSummary = {
   monsterName: string;
   xp: GameNumber;
   gold: GameNumber;
+  autoSoldGold: GameNumber;
   renown: GameNumber;
   progress: number;
   resources: Record<string, GameNumber>;
   itemIds: string[];
+  autoSoldItemIds: string[];
   at: number;
 };
 
@@ -150,11 +155,24 @@ export type ChallengeRecord = {
   completions: number;
 };
 
+export type AchievementRecord = {
+  completedAt?: number;
+};
+
 export type ActiveChallenge = {
   challengeId: string;
   startedAt: number;
   completedAt?: number;
   completedLevel?: ChallengeLevel;
+};
+
+export type SettlementState = {
+  foundedAtPrestige?: number;
+  seasonsPassed: number;
+  population: number;
+  stores: number;
+  outpostScouts: number;
+  forgeHeat: number;
 };
 
 export type FeatureUnlocks = {
@@ -166,6 +184,7 @@ export type FeatureUnlocks = {
   bossIdentity: boolean;
   areaTravel: boolean;
   prestige: boolean;
+  settlement: boolean;
 };
 
 export type UnlockNotice = {
@@ -203,17 +222,25 @@ export type GameState = {
   inventory: {
     items: InventoryItem[];
     equipped: Partial<Record<EquipmentSlot, string>>;
+    autoSellDuplicates: boolean;
   };
   training: Record<TrainingId, TrainingState>;
+  activeTrainingId?: TrainingId;
   resources: Record<string, GameNumber>;
   time: TimeState;
+  achievements: {
+    records: Record<string, AchievementRecord>;
+    secretTokens: number;
+  };
   challenges: {
     active?: ActiveChallenge;
     records: Record<string, ChallengeRecord>;
   };
+  settlement: SettlementState;
   unlocks: {
     autoBoss: boolean;
     autoAdvanceArea: boolean;
+    autoSellDuplicates: boolean;
   };
 };
 
@@ -237,6 +264,7 @@ export type GameSnapshot = {
   };
   boss: MonsterSpec;
   stats: StatBlock;
+  gearScore: number;
   power: number;
   survival: number;
   hunterHp: number;
@@ -249,6 +277,16 @@ export type GameSnapshot = {
     capstoneCleared: boolean;
     gain: number;
     nextRenown: GameNumber;
+    statMultiplier: number;
+    rewardMultiplier: number;
+  };
+  achievements: {
+    completed: number;
+    visibleCompleted: number;
+    visibleTotal: number;
+    secretCompleted: number;
+    secretTotal: number;
+    secretTokens: number;
     statMultiplier: number;
     rewardMultiplier: number;
   };

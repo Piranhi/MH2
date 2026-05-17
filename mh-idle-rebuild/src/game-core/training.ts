@@ -1,5 +1,4 @@
-import { add, gameNumber, greaterThanOrEqual, multiply, power, subtract } from "./numbers";
-import type { GameNumber, GameNumberSource } from "./numbers";
+import { multiply, power } from "./numbers";
 import type { GameState, StatBlock, TrainingId, TrainingState } from "./types";
 
 export type TrainingSpec = {
@@ -8,8 +7,8 @@ export type TrainingSpec = {
   description: string;
   stat: keyof StatBlock;
   statGain: number;
-  baseCost: GameNumberSource;
-  costGrowth: number;
+  baseSeconds: number;
+  timeGrowth: number;
 };
 
 export const trainingSpecs: TrainingSpec[] = [
@@ -19,8 +18,8 @@ export const trainingSpecs: TrainingSpec[] = [
     description: "Practiced strikes increase attack.",
     stat: "attack",
     statGain: 3,
-    baseCost: 25,
-    costGrowth: 1.55
+    baseSeconds: 45,
+    timeGrowth: 1.55
   },
   {
     id: "vigor",
@@ -28,8 +27,8 @@ export const trainingSpecs: TrainingSpec[] = [
     description: "Long marches increase health.",
     stat: "health",
     statGain: 18,
-    baseCost: 20,
-    costGrowth: 1.5
+    baseSeconds: 38,
+    timeGrowth: 1.52
   },
   {
     id: "guard",
@@ -37,8 +36,8 @@ export const trainingSpecs: TrainingSpec[] = [
     description: "Defensive drills increase defence.",
     stat: "defence",
     statGain: 2,
-    baseCost: 30,
-    costGrowth: 1.6
+    baseSeconds: 50,
+    timeGrowth: 1.57
   },
   {
     id: "mending",
@@ -46,23 +45,13 @@ export const trainingSpecs: TrainingSpec[] = [
     description: "Triage habits increase health recovery.",
     stat: "recoveryRate",
     statGain: 0.0005,
-    baseCost: 35,
-    costGrowth: 1.58
+    baseSeconds: 55,
+    timeGrowth: 1.58
   }
 ];
 
 export function createTrainingState(): Record<TrainingId, TrainingState> {
-  return Object.fromEntries(trainingSpecs.map((spec) => [spec.id, { level: 0 }])) as Record<TrainingId, TrainingState>;
-}
-
-export function getTrainingCost(state: GameState, trainingId: TrainingId): GameNumber {
-  const spec = getTrainingSpec(trainingId);
-  const level = state.training?.[trainingId]?.level ?? 0;
-  return getTrainingCostAtLevel(spec, level);
-}
-
-export function canBuyTraining(state: GameState, trainingId: TrainingId): boolean {
-  return greaterThanOrEqual(state.player.gold, getTrainingCost(state, trainingId));
+  return Object.fromEntries(trainingSpecs.map((spec) => [spec.id, { level: 0, progressSeconds: 0 }])) as Record<TrainingId, TrainingState>;
 }
 
 export function getTrainingSpec(trainingId: TrainingId): TrainingSpec {
@@ -102,41 +91,51 @@ export function getTrainingPotency(state: GameState): number {
   return 1 + state.player.prestige * 0.1;
 }
 
-export function getAffordableTrainingPurchases(state: GameState, trainingId: TrainingId, limit = 1000): number {
-  const spec = getTrainingSpec(trainingId);
-  let gold = gameNumber(state.player.gold);
-  let level = state.training?.[trainingId]?.level ?? 0;
-  let purchases = 0;
-
-  while (purchases < limit) {
-    const cost = getTrainingCostAtLevel(spec, level);
-
-    if (!greaterThanOrEqual(gold, cost)) {
-      break;
-    }
-
-    gold = subtract(gold, cost);
-    level += 1;
-    purchases += 1;
-  }
-
-  return purchases;
+export function getTrainingRate(state: GameState): number {
+  return (1 + state.player.prestige * 0.35) * (1 + (state.settlement?.seasonsPassed ?? 0) * 0.01);
 }
 
-export function getTrainingPurchaseCost(state: GameState, trainingId: TrainingId, purchases: number): GameNumber {
+export function getTrainingDuration(state: GameState, trainingId: TrainingId): number {
   const spec = getTrainingSpec(trainingId);
-  const startLevel = state.training?.[trainingId]?.level ?? 0;
-  let total = gameNumber(0);
-
-  for (let offset = 0; offset < Math.max(0, Math.floor(purchases)); offset += 1) {
-    total = add(total, getTrainingCostAtLevel(spec, startLevel + offset));
-  }
-
-  return total;
+  const level = state.training?.[trainingId]?.level ?? 0;
+  return getTrainingDurationAtLevel(spec, level);
 }
 
-export function getTrainingCostAtLevel(spec: TrainingSpec, level: number): GameNumber {
-  return multiply(spec.baseCost, power(spec.costGrowth, Math.max(0, level))).ceil();
+export function getTrainingProgressPercent(state: GameState, trainingId: TrainingId): number {
+  const progress = state.training?.[trainingId]?.progressSeconds ?? 0;
+  return Math.max(0, Math.min(100, (progress / getTrainingDuration(state, trainingId)) * 100));
+}
+
+export function getTrainingSecondsRemaining(state: GameState, trainingId: TrainingId): number {
+  const progress = state.training?.[trainingId]?.progressSeconds ?? 0;
+  return Math.max(0, (getTrainingDuration(state, trainingId) - progress) / getTrainingRate(state));
+}
+
+export function getTrainingDurationAtLevel(spec: TrainingSpec, level: number): number {
+  return Math.ceil(multiply(spec.baseSeconds, power(spec.timeGrowth, Math.max(0, level))).toNumber());
+}
+
+export function advanceTrainingProgress(state: GameState, seconds: number): void {
+  const activeTrainingId = state.activeTrainingId;
+
+  if (!activeTrainingId) {
+    return;
+  }
+
+  const training = state.training[activeTrainingId];
+
+  if (!training) {
+    return;
+  }
+
+  training.progressSeconds += Math.max(0, seconds) * getTrainingRate(state);
+
+  let completions = 0;
+  while (training.progressSeconds >= getTrainingDuration(state, activeTrainingId) && completions < 10000) {
+    training.progressSeconds -= getTrainingDuration(state, activeTrainingId);
+    training.level += 1;
+    completions += 1;
+  }
 }
 
 export function reviveTrainingState(value: Partial<Record<TrainingId, TrainingState>> | undefined): Record<TrainingId, TrainingState> {
@@ -144,7 +143,8 @@ export function reviveTrainingState(value: Partial<Record<TrainingId, TrainingSt
 
   for (const spec of trainingSpecs) {
     fresh[spec.id] = {
-      level: Math.max(0, Math.floor(value?.[spec.id]?.level ?? 0))
+      level: Math.max(0, Math.floor(value?.[spec.id]?.level ?? 0)),
+      progressSeconds: Math.max(0, Number(value?.[spec.id]?.progressSeconds ?? 0))
     };
   }
 

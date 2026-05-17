@@ -7,19 +7,15 @@ import {
 import { gameContent } from "../content/content";
 import {
   attemptBoss,
-  buyTraining,
   createGame,
   equipItem,
   getSnapshot,
   selectArea,
+  setActiveTraining,
   tick
 } from "../game";
 import { formatGameNumber } from "../numbers";
-import {
-  canBuyTraining,
-  getTrainingCost,
-  trainingSpecs
-} from "../training";
+import { trainingSpecs } from "../training";
 import type { AreaSpec, GameContent, GameState, InventoryItem, ItemSpec, MonsterSpec, TrainingId } from "../types";
 
 export type ProgressionEvent =
@@ -75,7 +71,9 @@ export function addItem(state: GameState, itemId: string, instanceId = `test-${i
         {
           instanceId,
           itemId,
-          acquiredAt: state.updatedAt
+          acquiredAt: state.updatedAt,
+          level: 1,
+          locked: false
         }
       ]
     }
@@ -143,24 +141,9 @@ export function equipBestItems(state: GameState, content: GameContent = gameCont
   return equipped;
 }
 
-export function buyAffordableTraining(state: GameState, maxPurchases = 50): GameState {
-  let trained = state;
-
-  for (let purchase = 0; purchase < maxPurchases; purchase += 1) {
-    const affordable = trainingSpecs
-      .filter((training) => canBuyTraining(trained, training.id))
-      .sort((a, b) => getTrainingCost(trained, a.id).cmp(getTrainingCost(trained, b.id)));
-
-    const nextTraining = pickTraining(affordable.map((training) => training.id), trained);
-
-    if (!nextTraining) {
-      return trained;
-    }
-
-    trained = buyTraining(trained, nextTraining);
-  }
-
-  return trained;
+export function buyAffordableTraining(state: GameState, _maxPurchases = 50): GameState {
+  const nextTraining = pickTraining(trainingSpecs.map((training) => training.id), state);
+  return nextTraining && state.activeTrainingId !== nextTraining ? setActiveTraining(state, nextTraining) : state;
 }
 
 export function getKillSecondsForMonster(state: GameState, monsterId: string, content: GameContent = gameContent): number {

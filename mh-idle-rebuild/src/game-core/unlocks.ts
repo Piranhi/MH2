@@ -15,7 +15,8 @@ export function getFeatureUnlocks(state: GameState, currentArea: AreaSpec): Feat
     inventory: state.inventory.items.length > 1,
     bossIdentity: currentAreaState.bossUnlocked || currentAreaState.bossDefeated,
     areaTravel: Object.values(state.areas).filter((area) => area.unlocked).length > 1,
-    prestige: state.player.prestige > 0 || currentArea.tier > 1 || greaterThanOrEqual(state.player.renown, balance.prestigeRenownBase / 2)
+    prestige: state.player.prestige > 0 || currentArea.tier > 1 || greaterThanOrEqual(state.player.renown, balance.prestigeRenownBase / 2),
+    settlement: state.player.prestige > 0
   };
 }
 
@@ -34,7 +35,7 @@ export function getUnlockNotices(features: FeatureUnlocks): UnlockNotice[] {
     notices.push({
       id: "training",
       title: "Training",
-      description: "Gold can now be spent on hunter upgrades."
+      description: "Time can now be focused into hunter drills."
     });
   }
 
@@ -83,6 +84,14 @@ export function getUnlockNotices(features: FeatureUnlocks): UnlockNotice[] {
       id: "prestige",
       title: "Prestige",
       description: "Run resets can now build permanent power."
+    });
+  }
+
+  if (features.settlement) {
+    notices.push({
+      id: "settlement",
+      title: "Settlement",
+      description: "Your camp now grows between prestige cycles."
     });
   }
 

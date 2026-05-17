@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advanceRealtime, attemptBoss, bankOfflineTime, buyTimeUpgrade, createGame, getOfflineBankRate, getSnapshot, prestigeRun, selectArea, setTimeSpeed, simulateOffline, spendBankedTime, tick } from "../game";
+import { advanceRealtime, attemptBoss, bankOfflineTime, buyTimeUpgrade, createGame, equipItem, getOfflineBankRate, getSnapshot, mergeItem, prestigeRun, selectArea, sellItem, setAutoSellDuplicates, setItemLocked, setTimeSpeed, simulateOffline, spendBankedTime, tick } from "../game";
 import { gameContent } from "../content/content";
 import { gameNumber } from "../numbers";
 import { serializeGame, parseGameSave } from "../save";
@@ -171,6 +171,9 @@ describe("headless hunt simulation", () => {
     expect(prestiged.player.gold.eq(0)).toBe(true);
     expect(prestiged.training.might.level).toBe(0);
     expect(prestiged.areas["ironroot-basin"].unlocked).toBe(false);
+    expect(prestiged.settlement.foundedAtPrestige).toBe(1);
+    expect(prestiged.settlement.seasonsPassed).toBe(1);
+    expect(prestiged.settlement.population).toBeGreaterThan(0);
     expect(snapshot.stats.attack).toBeGreaterThan(freshStats.attack);
     expect(snapshot.prestige.statMultiplier).toBe(1.05);
   });
@@ -232,6 +235,121 @@ describe("headless hunt simulation", () => {
     expect(upgraded.time.offlineEfficiencyLevel).toBe(1);
     expect(getOfflineBankRate(upgraded)).toBe(0.6);
     expect(offline.time.bankedSeconds).toBe(60);
+  });
+
+  it("sells unequipped loot for gold without touching equipped gear", () => {
+    const state = createGame(100);
+    state.inventory.items.push(
+      { instanceId: "loot-weapon", itemId: "scuffed-hunter-blade", acquiredAt: 100, level: 1, locked: false },
+      { instanceId: "loot-charm", itemId: "mossfang-charm", acquiredAt: 101, level: 1, locked: false }
+    );
+
+    const equipped = equipItem(state, "loot-weapon");
+    const blocked = sellItem(equipped, "loot-weapon");
+    const sold = sellItem(blocked, "loot-charm");
+
+    expect(blocked.inventory.items.some((item) => item.instanceId === "loot-weapon")).toBe(true);
+    expect(blocked.player.gold.eq(0)).toBe(true);
+    expect(sold.inventory.items.some((item) => item.instanceId === "loot-charm")).toBe(false);
+    expect(sold.inventory.equipped.weapon).toBe("loot-weapon");
+    expect(sold.player.gold.eq(42)).toBe(true);
+  });
+
+  it("locked items cannot be sold or consumed as merge sources", () => {
+    const state = createGame(100);
+    state.inventory.items.push(
+      { instanceId: "blade-target", itemId: "scuffed-hunter-blade", acquiredAt: 101, level: 1, locked: false },
+      { instanceId: "blade-locked", itemId: "scuffed-hunter-blade", acquiredAt: 102, level: 4, locked: false }
+    );
+
+    const locked = setItemLocked(state, "blade-locked", true);
+    const sellBlocked = sellItem(locked, "blade-locked");
+    const mergeBlocked = mergeItem(sellBlocked, "starter-blade-1", "blade-locked");
+    const upgradedLockedTarget = mergeItem(mergeBlocked, "blade-locked", "blade-target");
+
+    expect(sellBlocked.inventory.items.some((item) => item.instanceId === "blade-locked")).toBe(true);
+    expect(mergeBlocked.inventory.items.find((item) => item.instanceId === "starter-blade-1")?.level).toBe(1);
+    expect(upgradedLockedTarget.inventory.items.find((item) => item.instanceId === "blade-locked")?.level).toBe(5);
+    expect(upgradedLockedTarget.inventory.items.some((item) => item.instanceId === "blade-target")).toBe(false);
+  });
+
+  it("auto-sells duplicate item drops only after the earned option is enabled", () => {
+    const duplicateDropContent = {
+      ...gameContent,
+      monsters: gameContent.monsters.map((monster) => monster.id === "mossfang-stalker"
+        ? {
+            ...monster,
+            loot: [{ type: "item" as const, itemId: "mossfang-charm", chance: 1 }]
+          }
+        : monster)
+    };
+    const state = createGame(100);
+    state.unlocks.autoSellDuplicates = true;
+    state.inventory.items.push({
+      instanceId: "duplicate-charm",
+      itemId: "mossfang-charm",
+      acquiredAt: 101,
+      level: 1,
+      locked: false
+    });
+
+    const enabled = setAutoSellDuplicates(state, true);
+    const beforeGold = enabled.player.gold;
+    const afterDrop = tick(enabled, 10, duplicateDropContent);
+
+    expect(afterDrop.inventory.autoSellDuplicates).toBe(true);
+    expect(afterDrop.inventory.items.filter((item) => item.itemId === "mossfang-charm")).toHaveLength(1);
+    expect(afterDrop.player.gold.gt(beforeGold)).toBe(true);
+    expect(afterDrop.hunt.lastReward?.autoSoldItemIds).toContain("mossfang-charm");
+    expect(afterDrop.hunt.lastReward?.autoSoldGold.gt(0)).toBe(true);
+  });
+
+  it("manually merges duplicate equipment into item levels without consuming equipped sources", () => {
+    const state = createGame(100);
+    state.inventory.items.push(
+      { instanceId: "blade-a", itemId: "scuffed-hunter-blade", acquiredAt: 101, level: 1, locked: false },
+      { instanceId: "blade-b", itemId: "scuffed-hunter-blade", acquiredAt: 102, level: 4, locked: false }
+    );
+
+    const merged = mergeItem(state, "starter-blade-1", "blade-b");
+    const blocked = mergeItem(merged, "blade-a", "starter-blade-1");
+    const sourceMaxed = {
+      ...blocked,
+      inventory: {
+        ...blocked.inventory,
+        items: blocked.inventory.items.map((item) => item.instanceId === "blade-a" ? { ...item, level: 100 } : item)
+      }
+    };
+    const maxSourceBlocked = mergeItem(sourceMaxed, "starter-blade-1", "blade-a");
+
+    expect(merged.inventory.items.find((item) => item.instanceId === "starter-blade-1")?.level).toBe(5);
+    expect(merged.inventory.items.some((item) => item.instanceId === "blade-b")).toBe(false);
+    expect(blocked.inventory.items.find((item) => item.instanceId === "starter-blade-1")?.level).toBe(5);
+    expect(blocked.inventory.items.some((item) => item.instanceId === "starter-blade-1")).toBe(true);
+    expect(maxSourceBlocked.inventory.items.find((item) => item.instanceId === "starter-blade-1")?.level).toBe(5);
+    expect(maxSourceBlocked.inventory.items.some((item) => item.instanceId === "blade-a")).toBe(true);
+  });
+
+  it("levelled equipment increases stats and caps at level 100", () => {
+    const state = createGame(100);
+    state.inventory.items[0].level = 99;
+    state.inventory.items.push({
+      instanceId: "blade-cap",
+      itemId: "scuffed-hunter-blade",
+      acquiredAt: 101,
+      level: 50,
+      locked: false
+    });
+
+    const baseAttack = getSnapshot(createGame(100)).stats.attack;
+    const baseGearScore = getSnapshot(createGame(100)).gearScore;
+    const merged = mergeItem(state, "starter-blade-1", "blade-cap");
+    const snapshot = getSnapshot(merged);
+
+    expect(merged.inventory.items.find((item) => item.instanceId === "starter-blade-1")?.level).toBe(100);
+    expect(snapshot.stats.attack).toBeGreaterThan(baseAttack);
+    expect(snapshot.gearScore).toBeGreaterThan(baseGearScore);
+    expect(snapshot.stats.critChance).toBeGreaterThan(getSnapshot(createGame(100)).stats.critChance);
   });
 });
 

@@ -1,8 +1,10 @@
 import { createGame, normalizeAreaStates } from "./game";
+import { reviveAchievementRecords } from "./achievements";
 import { getChallengeSpec, reviveChallengeRecords } from "./challenges";
 import { reviveGameNumber } from "./numbers";
 import { reviveTrainingState } from "./training";
-import type { ChallengeLevel, GameState, RewardSummary } from "./types";
+import { getItemLevel } from "./items";
+import type { ChallengeLevel, GameState, RewardSummary, SettlementState } from "./types";
 
 export const currentSaveVersion = 1;
 
@@ -72,12 +74,21 @@ function normalizeState(state: GameState): GameState {
     inventory: {
       ...fresh.inventory,
       ...stateWithoutLegacyLog.inventory,
+      items: (stateWithoutLegacyLog.inventory?.items ?? fresh.inventory.items).map((item) => ({
+        ...item,
+        level: getItemLevel(item),
+        locked: Boolean(item.locked)
+      })),
       equipped: {
         ...fresh.inventory.equipped,
         ...stateWithoutLegacyLog.inventory.equipped
-      }
+      },
+      autoSellDuplicates: Boolean(stateWithoutLegacyLog.inventory?.autoSellDuplicates)
     },
     training: reviveTrainingState(stateWithoutLegacyLog.training),
+    activeTrainingId: stateWithoutLegacyLog.activeTrainingId && fresh.training[stateWithoutLegacyLog.activeTrainingId]
+      ? stateWithoutLegacyLog.activeTrainingId
+      : undefined,
     resources: {
       ...fresh.resources,
       ...Object.fromEntries(
@@ -86,6 +97,10 @@ function normalizeState(state: GameState): GameState {
           reviveGameNumber(amount)
         ])
       )
+    },
+    achievements: {
+      records: reviveAchievementRecords(stateWithoutLegacyLog.achievements?.records),
+      secretTokens: Math.max(0, Math.floor(Number(stateWithoutLegacyLog.achievements?.secretTokens ?? 0)))
     },
     challenges: {
       records: reviveChallengeRecords(stateWithoutLegacyLog.challenges?.records),
@@ -102,6 +117,7 @@ function normalizeState(state: GameState): GameState {
           }
         : undefined
     },
+    settlement: reviveSettlementState(stateWithoutLegacyLog.settlement),
     time: {
       ...fresh.time,
       ...stateWithoutLegacyLog.time,
@@ -121,12 +137,27 @@ function normalizeState(state: GameState): GameState {
   };
 }
 
+function reviveSettlementState(settlement: Partial<SettlementState> | undefined): SettlementState {
+  return {
+    foundedAtPrestige: settlement?.foundedAtPrestige === undefined
+      ? undefined
+      : Math.max(1, Math.floor(Number(settlement.foundedAtPrestige))),
+    seasonsPassed: Math.max(0, Math.floor(Number(settlement?.seasonsPassed ?? 0))),
+    population: Math.max(0, Math.floor(Number(settlement?.population ?? 0))),
+    stores: Math.max(0, Math.floor(Number(settlement?.stores ?? 0))),
+    outpostScouts: Math.max(0, Math.floor(Number(settlement?.outpostScouts ?? 0))),
+    forgeHeat: Math.max(0, Math.floor(Number(settlement?.forgeHeat ?? 0)))
+  };
+}
+
 function reviveRewardSummary(reward: RewardSummary): RewardSummary {
   return {
     ...reward,
     xp: reviveGameNumber(reward.xp),
     gold: reviveGameNumber(reward.gold),
+    autoSoldGold: reviveGameNumber((reward as Partial<RewardSummary>).autoSoldGold),
     renown: reviveGameNumber(reward.renown),
+    autoSoldItemIds: reward.autoSoldItemIds ?? [],
     resources: Object.fromEntries(
       Object.entries(reward.resources ?? {}).map(([resourceId, amount]) => [
         resourceId,

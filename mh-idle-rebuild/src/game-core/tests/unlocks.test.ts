@@ -15,7 +15,8 @@ describe("feature unlocks", () => {
       inventory: false,
       bossIdentity: false,
       areaTravel: false,
-      prestige: false
+      prestige: false,
+      settlement: false
     });
     expect(snapshot.unlockNotices).toEqual([]);
   });
@@ -36,7 +37,9 @@ describe("feature unlocks", () => {
     withItem.inventory.items.push({
       instanceId: "test-drop-1",
       itemId: "mossguard-vest",
-      acquiredAt: 1
+      acquiredAt: 1,
+      level: 1,
+      locked: false
     });
     withItem.resources["green-herb"] = gameNumber(3);
 
@@ -54,5 +57,16 @@ describe("feature unlocks", () => {
 
     expect(cleared.features.areaTravel).toBe(true);
     expect(cleared.unlockNotices.map((notice) => notice.id)).toContain("areaTravel");
+  });
+
+  it("keeps settlement hidden until the first prestige", () => {
+    const state = createGame();
+
+    expect(getSnapshot(state).features.settlement).toBe(false);
+
+    state.player.prestige = 1;
+
+    expect(getSnapshot(state).features.settlement).toBe(true);
+    expect(getSnapshot(state).unlockNotices.map((notice) => notice.id)).toContain("settlement");
   });
 });

@@ -1,6 +1,7 @@
 import {
   Activity,
   Backpack,
+  Bug,
   Castle,
   CircleDot,
   Clock3,
@@ -10,6 +11,7 @@ import {
   Gem,
   Hammer,
   Hand,
+  Home,
   Lock,
   Map,
   Medal,
@@ -24,23 +26,28 @@ import {
   Zap
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { abandonChallenge, advanceRealtime, attemptBoss, buyTimeUpgrade, buyTraining, canBuyTimeUpgrade, equipItem, getOfflineBankRate, getSnapshot, getTimeUpgradeCost, prestigeRun, selectArea, setTimeSpeed, spendBankedTime, startChallenge } from "../game-core/game";
+import type { ChangeEvent } from "react";
+import { abandonChallenge, advanceRealtime, attemptBoss, buyTimeUpgrade, canBuyTimeUpgrade, createGame, equipItem, getOfflineBankRate, getSettlementBonuses, getSnapshot, getTimeUpgradeCost, mergeItem, prestigeRun, selectArea, sellItem, setActiveTraining, setAutoSellDuplicates, setItemLocked, setTimeSpeed, spendBankedTime, startChallenge } from "../game-core/game";
 import { gameContent } from "../game-core/content/content";
 import { getRouteGuidance } from "../game-core/guidance";
+import { achievementSpecs, isAchievementComplete } from "../game-core/achievements";
 import { challengeSpecs, getChallengeElapsedSeconds, getChallengeRecord, getNextChallengeReward, isChallengeUnlocked } from "../game-core/challenges";
 import { xpForNextLevel } from "../game-core/balance";
-import { formatGameNumber, toFiniteNumber } from "../game-core/numbers";
+import { formatGameNumber, gameNumber, toFiniteNumber } from "../game-core/numbers";
 import type { GameNumber } from "../game-core/numbers";
+import { getItemGearScore, getItemLevel, getItemMasteryLabel, getItemSellValue, getLeveledItemEffects, maxItemLevel } from "../game-core/items";
 import type { RouteGuidanceAction } from "../game-core/guidance";
-import { canBuyTraining, getAffordableTrainingPurchases, getNextTrainingGain, getTrainingCost, getTrainingMilestoneBonus, getTrainingPotency, getTrainingPurchaseCost, trainingSpecs } from "../game-core/training";
+import { getNextTrainingGain, getTrainingDuration, getTrainingProgressPercent, getTrainingRate, getTrainingSecondsRemaining, getTrainingMilestoneBonus, trainingSpecs } from "../game-core/training";
 import type { EquipmentSlot, GameState, InventoryItem, ItemSpec, MonsterSpec, ResourceSpec, SpeedMultiplier, TimeUpgradeId, TrainingId } from "../game-core/types";
 import { clearBrowserSave, loadBrowserSave, writeBrowserSave } from "../platform/browserSave";
+import { getAreaAsset, getItemAsset, getMonsterAsset, getResourceAsset, hunterPortraitAsset } from "./assets";
 
 const formatWhole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const formatOne = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 
-type AppView = "hunt" | "train" | "offline" | "inventory" | "prestige" | "challenges";
-type TrainingPurchaseAmount = 1 | 10 | "max";
+type AppView = "hunt" | "train" | "offline" | "inventory" | "prestige" | "challenges" | "achievements" | "settlement";
+type InventoryFilter = "all" | "weapon" | "armor" | "charm" | "locked" | "upgradable";
+type InventorySort = "recent" | "rarity" | "level" | "strongest" | "name";
 
 type EquipmentSlotView = {
   id: EquipmentSlot;
@@ -61,10 +68,27 @@ const equipmentSlotViews: EquipmentSlotView[] = [
   { id: "relic", label: "Relic", accepts: ["relic"], unlocked: false, icon: <Scroll size={24} /> }
 ];
 
+const inventoryFilterOptions: { id: InventoryFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "weapon", label: "Weapons" },
+  { id: "armor", label: "Armor" },
+  { id: "charm", label: "Charms" },
+  { id: "upgradable", label: "Stackable" },
+  { id: "locked", label: "Locked" }
+];
+
+const inventorySortOptions: { id: InventorySort; label: string }[] = [
+  { id: "recent", label: "Recent" },
+  { id: "strongest", label: "Strongest" },
+  { id: "level", label: "Level" },
+  { id: "rarity", label: "Rarity" },
+  { id: "name", label: "Name" }
+];
+
 export function App() {
   const [state, setState] = useState<GameState>(() => loadBrowserSave());
   const [view, setView] = useState<AppView>("hunt");
-  const [trainingPurchaseAmount, setTrainingPurchaseAmount] = useState<TrainingPurchaseAmount>(1);
+  const [debugOpen, setDebugOpen] = useState(false);
   const [selectedInventoryItemId, setSelectedInventoryItemId] = useState<string | undefined>(() => state.inventory.items[0]?.instanceId);
 
   useEffect(() => {
@@ -88,6 +112,13 @@ export function App() {
   const visiblePanels = snapshot.features;
   const activeChallenge = state.challenges.active;
   const completedChallenges = Object.values(state.challenges.records).filter((record) => record.level > 0).length;
+  const bagItemCount = state.inventory.items.filter((item) => !Object.values(state.inventory.equipped).includes(item.instanceId)).length;
+
+  useEffect(() => {
+    if (view === "settlement" && !visiblePanels.settlement) {
+      setView("hunt");
+    }
+  }, [view, visiblePanels.settlement]);
 
   return (
     <div className="app-shell">
@@ -105,10 +136,16 @@ export function App() {
           <NavRow icon={<Swords size={18} />} label="Hunt" active={view === "hunt"} onClick={() => setView("hunt")} />
           <NavRow icon={<Clock3 size={18} />} label="Offline" active={view === "offline"} badge={formatDurationCompact(state.time.bankedSeconds)} onClick={() => setView("offline")} />
           <NavRow icon={<Sparkles size={18} />} label="Prestige" active={view === "prestige"} badge={snapshot.prestige.canPrestige ? `+${snapshot.prestige.gain}` : String(state.player.prestige)} onClick={() => setView("prestige")} />
+          <NavRow icon={<Medal size={18} />} label="Achievements" active={view === "achievements"} badge={`${snapshot.achievements.visibleCompleted}/${snapshot.achievements.visibleTotal}`} onClick={() => setView("achievements")} />
           <NavRow icon={<Trophy size={18} />} label="Challenges" active={view === "challenges"} badge={activeChallenge ? "Active" : String(completedChallenges)} onClick={() => setView("challenges")} />
-          <NavRow icon={<Castle size={18} />} label="Outposts" disabled />
-          <NavRow icon={<Hammer size={18} />} label="Blacksmith" badge="Later" disabled />
-          <NavRow icon={<Backpack size={18} />} label="Inventory" active={view === "inventory"} badge={String(state.inventory.items.length)} onClick={() => setView("inventory")} />
+          {visiblePanels.settlement && (
+            <>
+              <NavRow icon={<Home size={18} />} label="Settlement" active={view === "settlement"} badge={`${state.settlement.seasonsPassed}`} onClick={() => setView("settlement")} />
+              <NavRow icon={<Castle size={18} />} label="Outposts" badge="Soon" disabled child />
+              <NavRow icon={<Hammer size={18} />} label="Blacksmith" badge="Later" disabled child />
+            </>
+          )}
+          <NavRow icon={<Backpack size={18} />} label="Inventory" active={view === "inventory"} badge={String(bagItemCount)} onClick={() => setView("inventory")} />
           <NavRow icon={<Skull size={18} />} label="Bestiary" disabled />
         </nav>
 
@@ -119,7 +156,7 @@ export function App() {
       </aside>
 
       <main className="main-view">
-        <TopBar state={state} xpPercent={xpPercent} />
+        <TopBar snapshot={snapshot} state={state} xpPercent={xpPercent} />
 
         {view === "inventory" ? (
           <InventoryView
@@ -128,6 +165,17 @@ export function App() {
             selectedItem={selectedInventoryItem}
             onSelectItem={(item) => setSelectedInventoryItemId(item.instanceId)}
             onEquip={(item) => setState((current) => equipItem(current, item.instanceId))}
+            onSell={(item) => {
+              setState((current) => sellItem(current, item.instanceId));
+              const nextItem = state.inventory.items.find((entry) => entry.instanceId !== item.instanceId);
+              setSelectedInventoryItemId(nextItem?.instanceId);
+            }}
+            onSetItemLocked={(item, locked) => setState((current) => setItemLocked(current, item.instanceId, locked))}
+            onMerge={(targetItem, sourceItem) => {
+              setState((current) => mergeItem(current, targetItem.instanceId, sourceItem.instanceId));
+              setSelectedInventoryItemId(targetItem.instanceId);
+            }}
+            onSetAutoSellDuplicates={(enabled) => setState((current) => setAutoSellDuplicates(current, enabled))}
           />
         ) : view === "prestige" ? (
           <PrestigePanel
@@ -150,15 +198,17 @@ export function App() {
             onStartChallenge={(challengeId) => setState((current) => startChallenge(current, challengeId))}
             onAbandonChallenge={() => setState((current) => abandonChallenge(current))}
           />
+        ) : view === "achievements" ? (
+          <AchievementsView snapshot={snapshot} state={state} />
+        ) : view === "settlement" && visiblePanels.settlement ? (
+          <SettlementView snapshot={snapshot} state={state} />
         ) : view === "train" ? (
           <TrainingView
             snapshot={snapshot}
             state={state}
             trainingUnlocked={visiblePanels.training}
-            purchaseAmount={trainingPurchaseAmount}
             onBackToHunt={() => setView("hunt")}
-            onSetPurchaseAmount={setTrainingPurchaseAmount}
-            onTrain={(trainingId) => setState((current) => buyTraining(current, trainingId, trainingPurchaseAmount))}
+            onTrain={(trainingId) => setState((current) => setActiveTraining(current, trainingId))}
           />
         ) : (
           <HuntView
@@ -174,7 +224,275 @@ export function App() {
           />
         )}
       </main>
+      <button className={`debug-toggle ${debugOpen ? "active" : ""}`} type="button" onClick={() => setDebugOpen((open) => !open)}>
+        <Bug size={16} />
+        Debug
+      </button>
+      {debugOpen && (
+        <DebugMenu
+          snapshot={snapshot}
+          state={state}
+          onClose={() => setDebugOpen(false)}
+          onSetState={(nextState, nextView) => {
+            setState(nextState);
+            if (nextView) {
+              setView(nextView);
+            }
+          }}
+          onMutateState={(mutator, nextView) => {
+            setState((current) => {
+              const nextState = mutator(advanceRealtime(current, 0));
+              return advanceRealtime(nextState, 0);
+            });
+            if (nextView) {
+              setView(nextView);
+            }
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+type DebugSkipId = "fresh" | "training" | "inventory" | "emberBoss" | "ironroot" | "prestigeReady" | "settlement";
+
+const debugSkipPoints: { id: DebugSkipId; label: string; view: AppView; description: string }[] = [
+  { id: "fresh", label: "Fresh Run", view: "hunt", description: "Clean level 1 save." },
+  { id: "training", label: "Training Open", view: "train", description: "First hunt complete, training visible." },
+  { id: "inventory", label: "Inventory Lab", view: "inventory", description: "Materials and varied gear drops." },
+  { id: "emberBoss", label: "Ember Boss Ready", view: "hunt", description: "First boss revealed and safe to test." },
+  { id: "ironroot", label: "Ironroot Open", view: "hunt", description: "Second area unlocked." },
+  { id: "prestigeReady", label: "Prestige Ready", view: "prestige", description: "Capstone cleared with enough renown." },
+  { id: "settlement", label: "Settlement Open", view: "settlement", description: "First prestige completed with seasons." }
+];
+
+function DebugMenu({
+  snapshot,
+  state,
+  onClose,
+  onSetState,
+  onMutateState
+}: {
+  snapshot: ReturnType<typeof getSnapshot>;
+  state: GameState;
+  onClose: () => void;
+  onSetState: (state: GameState, view?: AppView) => void;
+  onMutateState: (mutator: (state: GameState) => GameState, view?: AppView) => void;
+}) {
+  const allAreasOpen = gameContent.areas.every((area) => state.areas[area.id]?.unlocked);
+  const handleSettlementUnlockedChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.currentTarget.checked;
+    onMutateState((next) => setDebugSettlementUnlocked(next, checked), checked ? "settlement" : "hunt");
+  };
+  const handleAllAreasUnlockedChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.currentTarget.checked;
+    onMutateState((next) => setDebugAllAreasUnlocked(next, checked));
+  };
+  const handleAutoBossChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.currentTarget.checked;
+    onMutateState((next) => ({ ...next, unlocks: { ...next.unlocks, autoBoss: checked } }));
+  };
+  const handleAutoAdvanceChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.currentTarget.checked;
+    onMutateState((next) => ({ ...next, unlocks: { ...next.unlocks, autoAdvanceArea: checked } }));
+  };
+  const handleAutoSellChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const checked = event.currentTarget.checked;
+    onMutateState((next) => ({
+      ...next,
+      inventory: { ...next.inventory, autoSellDuplicates: checked ? next.inventory.autoSellDuplicates : false },
+      unlocks: { ...next.unlocks, autoSellDuplicates: checked }
+    }));
+  };
+
+  return (
+    <aside className="debug-menu" aria-label="Debug menu">
+      <div className="debug-menu-header">
+        <div>
+          <span className="eyebrow">Developer Tools</span>
+          <h2>Debug Menu</h2>
+        </div>
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+
+      <div className="debug-section">
+        <h3>Skip Points</h3>
+        <div className="debug-skip-grid">
+          {debugSkipPoints.map((skipPoint) => (
+            <button
+              type="button"
+              key={skipPoint.id}
+              onClick={() => onSetState(createDebugSkipState(state, skipPoint.id), skipPoint.view)}
+            >
+              <strong>{skipPoint.label}</strong>
+              <span>{skipPoint.description}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="debug-section">
+        <h3>Quick Grants</h3>
+        <div className="debug-action-row">
+          <button type="button" onClick={() => onMutateState((next) => grantDebugCurrency(next, "gold", 10000))}>+10K Gold</button>
+          <button type="button" onClick={() => onMutateState((next) => grantDebugCurrency(next, "renown", 250))}>+250 Renown</button>
+          <button type="button" onClick={() => onMutateState((next) => grantDebugBankedTime(next, 3600))}>+1h Banked</button>
+          <button type="button" onClick={() => onMutateState(addDebugInventory, "inventory")}>Add Gear Set</button>
+        </div>
+      </div>
+
+      <div className="debug-section">
+        <h3>Toggles</h3>
+        <div className="debug-toggle-list">
+          <label>
+            <input
+              type="checkbox"
+              checked={state.player.prestige > 0}
+              onChange={handleSettlementUnlockedChange}
+            />
+            <span>Settlement unlocked</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={allAreasOpen}
+              onChange={handleAllAreasUnlockedChange}
+            />
+            <span>All areas unlocked</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={state.unlocks.autoBoss}
+              onChange={handleAutoBossChange}
+            />
+            <span>Auto boss unlocked</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={state.unlocks.autoAdvanceArea}
+              onChange={handleAutoAdvanceChange}
+            />
+            <span>Auto area advance unlocked</span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={state.unlocks.autoSellDuplicates}
+              onChange={handleAutoSellChange}
+            />
+            <span>Auto-sell unlocked</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="debug-section debug-state-readout">
+        <h3>Current State</h3>
+        <Row label="View power" value={formatWhole.format(snapshot.power)} />
+        <Row label="Prestige" value={String(state.player.prestige)} />
+        <Row label="Hunts" value={String(state.hunt.huntsCompleted)} />
+        <Row label="Area" value={snapshot.currentArea.name} />
+      </div>
+    </aside>
+  );
+}
+
+function SettlementView({ snapshot, state }: { snapshot: ReturnType<typeof getSnapshot>; state: GameState }) {
+  const settlement = state.settlement;
+  const bonuses = getSettlementBonuses(settlement);
+  const seasonsToNext = Math.max(0, 3 - (settlement.seasonsPassed % 3 || 3));
+  const foundedLabel = settlement.foundedAtPrestige ? `Legacy ${settlement.foundedAtPrestige}` : "Not founded";
+  const districtCards = [
+    {
+      icon: <Home size={20} />,
+      title: "Hunter Hearth",
+      value: `${settlement.population}`,
+      label: "Settlers",
+      body: "The permanent camp that survives resets. Growth is counted when a legacy rite passes."
+    },
+    {
+      icon: <Castle size={20} />,
+      title: "Outpost Trails",
+      value: `${settlement.outpostScouts}`,
+      label: "Scout marks",
+      body: "Future area automation and route memory will live here."
+    },
+    {
+      icon: <Hammer size={20} />,
+      title: "Blacksmith Yard",
+      value: `${settlement.forgeHeat}`,
+      label: "Forge heat",
+      body: "Future item crafting, salvage, and duplicate handling will live here."
+    }
+  ];
+
+  return (
+    <section className="dashboard-panel settlement-page">
+      <div className="panel-title"><Home size={15} /> Settlement</div>
+      <div className="settlement-layout">
+        <div className="settlement-hero">
+          <span className="eyebrow">Long Game</span>
+          <h2>Hunter Settlement</h2>
+          <p>
+            The settlement grows when prestige makes time pass. It stays quiet during a run, then gains seasons, settlers, stores, scout marks, and forge heat when a legacy rite is completed.
+          </p>
+          <div className="settlement-summary-grid">
+            <div><span>Founded</span><strong>{foundedLabel}</strong></div>
+            <div><span>Seasons</span><strong>{settlement.seasonsPassed}</strong></div>
+            <div><span>Training</span><strong>x{formatOne.format(bonuses.trainingRate)}</strong></div>
+            <div><span>Gold Find</span><strong>+{formatOne.format((bonuses.goldFind - 1) * 100)}%</strong></div>
+            <div><span>Materials</span><strong>+{formatOne.format((bonuses.materialFind - 1) * 100)}%</strong></div>
+          </div>
+        </div>
+
+        <div className="settlement-ledger">
+          <span className="eyebrow">Permanent Track</span>
+          <h3>Prestige-linked growth</h3>
+          <Row label="Current prestige" value={String(state.player.prestige)} />
+          <Row label="Prestige ready" value={snapshot.prestige.canPrestige ? `+${snapshot.prestige.gain}` : "No"} muted={!snapshot.prestige.canPrestige} />
+          <Row label="Settlement age" value={`${settlement.seasonsPassed} seasons`} />
+          <Row label="Camp stores" value={String(settlement.stores)} />
+          <Row label="Next pulse" value={seasonsToNext === 0 ? "Next prestige" : `${seasonsToNext} seasons`} />
+        </div>
+
+        <div className="settlement-district-grid">
+          {districtCards.map((district) => (
+            <article className="settlement-district-card" key={district.title}>
+              <div>
+                {district.icon}
+                <span>{district.label}</span>
+              </div>
+              <strong>{district.value}</strong>
+              <h3>{district.title}</h3>
+              <p>{district.body}</p>
+            </article>
+          ))}
+        </div>
+
+        <div className="settlement-roadmap">
+          <span className="eyebrow">Locked Branches</span>
+          <div className="settlement-roadmap-list">
+            <article>
+              <Castle size={18} />
+              <div>
+                <strong>Outposts</strong>
+                <span>Unlocks after settlement growth starts producing route maps.</span>
+              </div>
+              <b>Soon</b>
+            </article>
+            <article>
+              <Hammer size={18} />
+              <div>
+                <strong>Blacksmith</strong>
+                <span>Unlocks when duplicate gear and salvage become a meaningful loop.</span>
+              </div>
+              <b>Later</b>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -276,6 +594,107 @@ function ChallengesView({
   );
 }
 
+function AchievementsView({
+  snapshot,
+  state
+}: {
+  snapshot: ReturnType<typeof getSnapshot>;
+  state: GameState;
+}) {
+  const visibleAchievements = achievementSpecs.filter((achievement) => !achievement.secret);
+  const secretAchievements = achievementSpecs.filter((achievement) => achievement.secret);
+
+  return (
+    <section className="dashboard-panel achievements-page">
+      <div className="panel-title"><Medal size={15} /> Achievements</div>
+      <div className="achievement-summary-grid">
+        <div>
+          <span className="eyebrow">Milestones</span>
+          <h2>{snapshot.achievements.visibleCompleted} / {snapshot.achievements.visibleTotal}</h2>
+        </div>
+        <div>
+          <span className="eyebrow">Secret</span>
+          <h2>{snapshot.achievements.secretCompleted} / {snapshot.achievements.secretTotal}</h2>
+        </div>
+        <div>
+          <span className="eyebrow">Tokens</span>
+          <h2>{snapshot.achievements.secretTokens}</h2>
+        </div>
+        <div>
+          <span className="eyebrow">Power</span>
+          <h2>+{formatOne.format((snapshot.achievements.statMultiplier - 1) * 100)}%</h2>
+        </div>
+        <div>
+          <span className="eyebrow">Rewards</span>
+          <h2>+{formatOne.format((snapshot.achievements.rewardMultiplier - 1) * 100)}%</h2>
+        </div>
+      </div>
+      <AchievementList title="Milestones" achievements={visibleAchievements} state={state} revealSecrets />
+      <AchievementList title="Secret Achievements" achievements={secretAchievements} state={state} />
+    </section>
+  );
+}
+
+function AchievementList({
+  title,
+  achievements,
+  state,
+  revealSecrets = false
+}: {
+  title: string;
+  achievements: typeof achievementSpecs;
+  state: GameState;
+  revealSecrets?: boolean;
+}) {
+  return (
+    <div className="achievement-band">
+      <div className="achievement-band-heading">
+        <span className="eyebrow">{title}</span>
+        <strong>{achievements.filter((achievement) => isAchievementComplete(state, achievement.id)).length} / {achievements.length}</strong>
+      </div>
+      <div className="achievement-card-grid">
+        {achievements.map((achievement) => {
+          const complete = isAchievementComplete(state, achievement.id);
+          const hidden = achievement.secret && !complete && !revealSecrets;
+          const rewardParts = [
+            achievement.reward.statPercent ? `+${formatOne.format(achievement.reward.statPercent * 100)}% power` : undefined,
+            achievement.reward.rewardPercent ? `+${formatOne.format(achievement.reward.rewardPercent * 100)}% rewards` : undefined,
+            achievement.reward.bankedSeconds ? `${formatDurationCompact(achievement.reward.bankedSeconds)} banked` : undefined,
+            achievement.reward.unlock ? `Unlock: ${formatUnlockReward(achievement.reward.unlock)}` : undefined,
+            achievement.reward.shopCurrency ? `Secret token +${achievement.reward.shopCurrency}` : undefined
+          ].filter(Boolean).join(" / ");
+
+          return (
+            <article className={`achievement-card ${complete ? "complete" : ""} ${hidden ? "hidden" : ""}`} key={achievement.id}>
+              <div className="achievement-number">#{achievement.number}</div>
+              <div className="achievement-body">
+                <div className="achievement-title-row">
+                  <h3>{hidden ? "Secret Achievement" : achievement.name}</h3>
+                  <strong>{complete ? "Complete" : "Locked"}</strong>
+                </div>
+                <p>{hidden ? "Requirement hidden until discovered." : achievement.requirement}</p>
+                <em>{hidden ? "Awards time and secret-shop currency." : rewardParts}</em>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function formatUnlockReward(unlock: "autoBoss" | "autoAdvanceArea" | "autoSellDuplicates"): string {
+  if (unlock === "autoBoss") {
+    return "Auto-Boss";
+  }
+
+  if (unlock === "autoAdvanceArea") {
+    return "Auto-Advance";
+  }
+
+  return "Auto-Sell Duplicates";
+}
+
 function HuntView({
   snapshot,
   state,
@@ -307,6 +726,13 @@ function HuntView({
           <BattleStage snapshot={snapshot} xpPercent={xpPercent} />
         </section>
 
+        <HuntLoopPanel
+          snapshot={snapshot}
+          state={state}
+          onOpenTraining={onOpenTraining}
+          onOpenInventory={onOpenInventory}
+        />
+
         <section className="dashboard-panel area-panel">
           <div className="panel-title">
             <Map size={15} />
@@ -334,6 +760,66 @@ function HuntView({
 
         {snapshot.unlockNotices.length > 0 && <UnlockNoticePanel notices={snapshot.unlockNotices} />}
     </>
+  );
+}
+
+function HuntLoopPanel({
+  snapshot,
+  state,
+  onOpenTraining,
+  onOpenInventory
+}: {
+  snapshot: ReturnType<typeof getSnapshot>;
+  state: GameState;
+  onOpenTraining: () => void;
+  onOpenInventory: () => void;
+}) {
+  const activeTraining = state.activeTrainingId ? trainingSpecs.find((training) => training.id === state.activeTrainingId) : undefined;
+  const totalTrainingLevels = trainingSpecs.reduce((total, training) => total + (state.training[training.id]?.level ?? 0), 0);
+  const activeTrainingProgress = activeTraining ? getTrainingProgressPercent(state, activeTraining.id) : 0;
+  const activeTrainingRemaining = activeTraining ? getTrainingSecondsRemaining(state, activeTraining.id) : 0;
+  const lastRewardItems = snapshot.lastReward?.itemIds.length ?? 0;
+  const lastAutoSoldItems = snapshot.lastReward?.autoSoldItemIds.length ?? 0;
+  const bagItems = state.inventory.items.filter((item) => !Object.values(state.inventory.equipped).includes(item.instanceId)).length;
+
+  return (
+    <section className="hunt-loop-strip" aria-label="Hunt loop progress">
+      <article className="loop-card loop-training-card">
+        <div>
+          <span className="eyebrow">Training</span>
+          <strong>{activeTraining ? activeTraining.name : "Idle"}</strong>
+          <em>{activeTraining ? `Level ${state.training[activeTraining.id]?.level ?? 0} / ${formatDuration(activeTrainingRemaining)}` : "Pick a drill to keep gaining."}</em>
+        </div>
+        <div className="loop-progress">
+          <div className="tiny-progress blue"><span style={{ width: `${activeTrainingProgress}%` }} /></div>
+          <button type="button" onClick={onOpenTraining}>{activeTraining ? "Adjust" : "Start"}</button>
+        </div>
+      </article>
+
+      <article className="loop-card">
+        <span>Training Levels</span>
+        <strong>{formatWhole.format(totalTrainingLevels)}</strong>
+        <em>x{formatOne.format(getTrainingRate(state))} rate</em>
+      </article>
+
+      <article className="loop-card">
+        <span>Hunt Rate</span>
+        <strong>{formatOne.format(snapshot.rates.huntsPerHour)} / hr</strong>
+        <em>{formatGameNumber(snapshot.rates.xpPerHour)} XP/hr</em>
+      </article>
+
+      <article className="loop-card">
+        <span>Loot Flow</span>
+        <strong>{formatGameNumber(snapshot.rates.goldPerHour)}g / hr</strong>
+        <em>{formatGameNumber(snapshot.rates.materialsPerHour)} materials/hr</em>
+      </article>
+
+      <article className="loop-card loop-inventory-card">
+        <span>Last Drop</span>
+        <strong>{lastRewardItems > 0 ? `${lastRewardItems} item` : lastAutoSoldItems > 0 ? "Auto-sold" : "Materials"}</strong>
+        <button type="button" onClick={onOpenInventory}>{bagItems} Bag</button>
+      </article>
+    </section>
   );
 }
 
@@ -443,17 +929,13 @@ function TrainingView({
   snapshot,
   state,
   trainingUnlocked,
-  purchaseAmount,
   onBackToHunt,
-  onSetPurchaseAmount,
   onTrain
 }: {
   snapshot: ReturnType<typeof getSnapshot>;
   state: GameState;
   trainingUnlocked: boolean;
-  purchaseAmount: TrainingPurchaseAmount;
   onBackToHunt: () => void;
-  onSetPurchaseAmount: (amount: TrainingPurchaseAmount) => void;
   onTrain: (trainingId: TrainingId) => void;
 }) {
   return (
@@ -464,21 +946,19 @@ function TrainingView({
           <div className="training-summary">
             <span className="eyebrow">Hunter Power</span>
             <h2>{formatWhole.format(snapshot.power)}</h2>
-            <p>Training costs grow exponentially. Milestones and legacy efficiency keep levels relevant while bulk buying clears old tiers quickly.</p>
+            <p>Choose one discipline to train over time. Early levels complete quickly, while later levels stretch into longer idle goals.</p>
             <div className="training-summary-grid">
-              <div><span>Gold</span><strong>{formatGameNumber(state.player.gold)}</strong></div>
+              <div><span>Active</span><strong>{state.activeTrainingId ? getTrainingSpecName(state.activeTrainingId) : "Idle"}</strong></div>
               <div><span>Boss Ready</span><strong>{formatWhole.format(Math.min(100, snapshot.bossReadiness * 100))}%</strong></div>
               <div><span>Attack</span><strong>{formatWhole.format(snapshot.stats.attack)}</strong></div>
               <div><span>Health</span><strong>{formatWhole.format(snapshot.stats.health)}</strong></div>
               <div><span>Recovery</span><strong>{formatOne.format(snapshot.recoveryPerSecond)} / sec</strong></div>
-              <div><span>Legacy Efficiency</span><strong>x{formatOne.format(getTrainingPotency(state))}</strong></div>
+              <div><span>Training Rate</span><strong>x{formatOne.format(getTrainingRate(state))}</strong></div>
             </div>
           </div>
           {trainingUnlocked ? (
             <TrainingPanel
               state={state}
-              purchaseAmount={purchaseAmount}
-              onSetPurchaseAmount={onSetPurchaseAmount}
               onTrain={onTrain}
               bare
             />
@@ -500,21 +980,32 @@ function TrainingView({
   );
 }
 
-function TopBar({ state, xpPercent }: { state: GameState; xpPercent: number }) {
+function TopBar({ snapshot, state, xpPercent }: { snapshot: ReturnType<typeof getSnapshot>; state: GameState; xpPercent: number }) {
   return (
-    <header className="top-bar">
-      <ResourcePill icon={<Zap size={20} />} label="Banked" value={formatDuration(state.time.bankedSeconds)} />
-      <ResourcePill icon={<Medal size={20} />} label="Gold" value={formatGameNumber(state.player.gold)} />
-      <ResourcePill icon={<Trophy size={20} />} label="Renown" value={formatGameNumber(state.player.renown)} />
-      <div className="resource-pill level-pill">
-        <Shield size={20} />
-        <div>
-          <span>Level</span>
-          <strong>{state.player.level}</strong>
+    <header className="top-hud">
+      <div className="top-bar">
+        <ResourcePill icon={<Zap size={20} />} label="Banked" value={formatDuration(state.time.bankedSeconds)} />
+        <ResourcePill icon={<Medal size={20} />} label="Gold" value={formatGameNumber(state.player.gold)} />
+        <ResourcePill icon={<Trophy size={20} />} label="Renown" value={formatGameNumber(state.player.renown)} />
+        <div className="resource-pill level-pill">
+          <Shield size={20} />
+          <div>
+            <span>Level</span>
+            <strong>{state.player.level}</strong>
+          </div>
+          <div className="tiny-progress"><span style={{ width: `${xpPercent}%` }} /></div>
         </div>
-        <div className="tiny-progress"><span style={{ width: `${xpPercent}%` }} /></div>
+        <ResourcePill icon={<Sparkles size={20} />} label="Prestige" value={String(state.player.prestige)} />
       </div>
-      <ResourcePill icon={<Sparkles size={20} />} label="Prestige" value={String(state.player.prestige)} />
+      <div className="core-stat-bar" aria-label="Core stats">
+        <div><span>Power</span><strong>{formatWhole.format(snapshot.power)}</strong></div>
+        <div><span>Survival</span><strong>{formatWhole.format(snapshot.survival)}</strong></div>
+        <div><span>Attack</span><strong>{formatWhole.format(snapshot.stats.attack)}</strong></div>
+        <div><span>Defence</span><strong>{formatWhole.format(snapshot.stats.defence)}</strong></div>
+        <div><span>Health</span><strong>{formatWhole.format(snapshot.stats.health)}</strong></div>
+        <div><span>Recovery</span><strong>{formatOne.format(snapshot.recoveryPerSecond)}/s</strong></div>
+        <div><span>Crit</span><strong>{formatOne.format(snapshot.stats.critChance * 100)}%</strong></div>
+      </div>
     </header>
   );
 }
@@ -582,25 +1073,46 @@ function InventoryView({
   state,
   selectedItem,
   onSelectItem,
-  onEquip
+  onEquip,
+  onSell,
+  onSetItemLocked,
+  onMerge,
+  onSetAutoSellDuplicates
 }: {
   snapshot: ReturnType<typeof getSnapshot>;
   state: GameState;
   selectedItem?: InventoryItem;
   onSelectItem: (item: InventoryItem) => void;
   onEquip: (item: InventoryItem) => void;
+  onSell: (item: InventoryItem) => void;
+  onSetItemLocked: (item: InventoryItem, locked: boolean) => void;
+  onMerge: (targetItem: InventoryItem, sourceItem: InventoryItem) => void;
+  onSetAutoSellDuplicates: (enabled: boolean) => void;
 }) {
+  const [inventoryFilter, setInventoryFilter] = useState<InventoryFilter>("all");
+  const [inventorySort, setInventorySort] = useState<InventorySort>("recent");
   const selectedSpec = selectedItem ? getItemSpec(selectedItem) : undefined;
   const equippedInstanceId = selectedSpec?.slot ? state.inventory.equipped[selectedSpec.slot] : undefined;
   const selectedIsEquipped = Boolean(selectedItem && selectedItem.instanceId === equippedInstanceId);
-  const equippedComparable = selectedSpec?.slot
-    ? getEquippedItem(state, selectedSpec.slot)
-    : undefined;
   const selectedSlotView = selectedSpec?.slot
     ? equipmentSlotViews.find((slot) => slot.accepts.includes(selectedSpec.slot!))
     : undefined;
   const selectedCanEquip = Boolean(selectedItem && selectedSpec?.slot && selectedSlotView?.unlocked && !selectedIsEquipped);
+  const selectedCanSell = Boolean(selectedItem && selectedSpec && !selectedItem.locked && !selectedIsEquipped);
   const selectedSlotLabel = selectedSlotView?.label ?? selectedSpec?.slot ?? "Item";
+  const equippedInstanceIds = Object.values(state.inventory.equipped);
+  const bagItems = state.inventory.items.filter((item) => !equippedInstanceIds.includes(item.instanceId));
+  const visibleBagItems = useMemo(() => {
+    return bagItems
+      .filter((item) => inventoryItemMatchesFilter(item, inventoryFilter, bagItems))
+      .sort((left, right) => compareInventoryItems(left, right, inventorySort));
+  }, [bagItems, inventoryFilter, inventorySort]);
+  const resources = Object.entries(state.resources)
+    .map(([resourceId, amount]) => ({
+      amount,
+      resource: gameContent.resources.find((entry) => entry.id === resourceId)
+    }))
+    .filter((entry): entry is { amount: GameNumber; resource: ResourceSpec } => Boolean(entry.resource));
 
   const handleItemDragStart = (event: React.DragEvent<HTMLButtonElement>, item: InventoryItem) => {
     event.dataTransfer.effectAllowed = "move";
@@ -631,8 +1143,63 @@ function InventoryView({
       return;
     }
 
+    const equipped = getEquippedItem(state, slot.id);
+    const equippedSpec = getItemSpec(equipped);
+    if (equipped && equippedSpec?.id === spec.id) {
+      if (canMergeInventoryItems(equipped, item, equippedInstanceIds)) {
+        onSelectItem(equipped);
+        onMerge(equipped, item);
+      }
+      return;
+    }
+
     onSelectItem(item);
     onEquip(item);
+  };
+
+  const handleItemDragOver = (event: React.DragEvent<HTMLButtonElement>, targetItem: InventoryItem) => {
+    const sourceInstanceId = event.dataTransfer.getData("application/x-hunter-item") || event.dataTransfer.getData("text/plain");
+    const sourceItem = state.inventory.items.find((entry) => entry.instanceId === sourceInstanceId);
+
+    if (sourceItem && canMergeInventoryItems(targetItem, sourceItem, equippedInstanceIds)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    }
+  };
+
+  const handleItemDrop = (event: React.DragEvent<HTMLButtonElement>, targetItem: InventoryItem) => {
+    event.preventDefault();
+
+    const sourceInstanceId = event.dataTransfer.getData("application/x-hunter-item") || event.dataTransfer.getData("text/plain");
+    const sourceItem = state.inventory.items.find((entry) => entry.instanceId === sourceInstanceId);
+
+    if (!sourceItem || !canMergeInventoryItems(targetItem, sourceItem, equippedInstanceIds)) {
+      return;
+    }
+
+    onSelectItem(targetItem);
+    onMerge(targetItem, sourceItem);
+  };
+
+  const handleInventoryItemClick = (event: React.MouseEvent<HTMLButtonElement>, item: InventoryItem) => {
+    if (event.shiftKey) {
+      event.preventDefault();
+      onSetItemLocked(item, !item.locked);
+      onSelectItem({ ...item, locked: !item.locked });
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      if (!item.locked) {
+        onSell(item);
+      } else {
+        onSelectItem(item);
+      }
+      return;
+    }
+
+    onSelectItem(item);
   };
 
   return (
@@ -644,15 +1211,20 @@ function InventoryView({
             <span className="eyebrow">Equipped</span>
             <h2>Hunter Kit</h2>
             <div className="equipment-socket-grid">
+              <div className="equipment-body-map" aria-hidden="true" />
               {equipmentSlotViews.map((slot) => {
                 const equipped = getEquippedItem(state, slot.id);
                 const spec = equipped ? getItemSpec(equipped) : undefined;
                 const compatible = Boolean(selectedSpec?.slot && slot.accepts.includes(selectedSpec.slot));
+                const mergeTarget = Boolean(equipped && selectedItem && canMergeInventoryItems(equipped, selectedItem, equippedInstanceIds));
                 const classes = [
                   "equipment-socket",
+                  `equipment-socket-${slot.id}`,
+                  spec ? `rarity-${spec.rarity}` : "",
                   slot.unlocked ? "unlocked" : "locked",
                   spec ? "filled" : "empty",
-                  compatible ? "compatible" : ""
+                  compatible ? "compatible" : "",
+                  mergeTarget ? "merge-target" : ""
                 ].filter(Boolean).join(" ");
 
                 return (
@@ -661,17 +1233,17 @@ function InventoryView({
                     key={slot.id}
                     className={classes}
                     aria-disabled={!slot.unlocked}
+                    data-tooltip={spec ? `${spec.name} / Level ${getItemLevel(equipped)}` : slot.unlocked ? `${slot.label}: Empty` : `${slot.label}: Locked`}
                     onClick={() => equipped && onSelectItem(equipped)}
                     onDragOver={(event) => handleSlotDragOver(event, slot)}
                     onDrop={(event) => handleSlotDrop(event, slot)}
                   >
                     <span className="slot-icon" aria-hidden="true">
-                      {slot.icon}
+                      {spec ? <img src={getItemAsset(spec.id)} alt="" /> : slot.icon}
                       {!slot.unlocked && <Lock className="slot-lock-icon" size={13} />}
                     </span>
-                    <span className="slot-label">{slot.label}</span>
-                    <strong>{spec?.name ?? (slot.unlocked ? "Empty" : "Locked")}</strong>
-                    <em>{spec ? itemEffectSummary(spec) : slot.unlocked ? "Open" : "Unlock later"}</em>
+                    {spec && getItemLevel(equipped) > 1 && <span className="item-level-pill">{getItemLevel(equipped)}</span>}
+                    <span className="sr-only">{spec ? `${slot.label}: ${spec.name}, level ${getItemLevel(equipped)}` : slot.unlocked ? `${slot.label}: Empty` : `${slot.label}: Locked`}</span>
                   </button>
                 );
               })}
@@ -683,75 +1255,149 @@ function InventoryView({
             </div>
           </div>
 
-          <div className="inventory-bag-column">
-            <div className="inventory-toolbar">
-              <span className="eyebrow">Bag</span>
-              <strong>{state.inventory.items.length} Items</strong>
-            </div>
-            <div className="inventory-list-grid">
-              {state.inventory.items.map((item) => {
-                const spec = getItemSpec(item);
-                const isEquipped = Object.values(state.inventory.equipped).includes(item.instanceId);
-
-                return (
-                  <button
-                    type="button"
-                    key={item.instanceId}
-                    className={`inventory-list-item ${selectedItem?.instanceId === item.instanceId ? "active" : ""} ${isEquipped ? "equipped" : ""}`}
-                    draggable={Boolean(spec?.slot)}
-                    onDragStart={(event) => handleItemDragStart(event, item)}
-                    onClick={() => onSelectItem(item)}
-                  >
-                    <div className="item-glyph">{spec?.name.slice(0, 1) ?? "?"}</div>
-                    <div>
-                      <strong>{spec?.name ?? "Unknown Item"}</strong>
-                      <span>{spec ? `${spec.rarity} T${spec.tier}` : "Unknown"}</span>
-                    </div>
-                    {isEquipped && <b>Equipped</b>}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="inventory-detail-column">
             {selectedSpec && selectedItem ? (
               <>
-                <span className="eyebrow">{selectedSpec.rarity} {selectedSpec.slot ?? "item"}</span>
+                <span className="eyebrow">{selectedSpec.rarity} {selectedSpec.slot ?? "item"} / Level {getItemLevel(selectedItem)} of {maxItemLevel}</span>
                 <h2>{selectedSpec.name}</h2>
                 <p>{selectedSpec.description}</p>
                 <div className="stat-table inventory-effect-table">
-                  {selectedSpec.effects.map((effect) => (
+                  {getLeveledItemEffects(selectedSpec, selectedItem).map((effect) => (
                     <Row
                       key={`${effect.stat}-${effect.value}-${effect.mode}`}
-                      label={effect.stat}
-                      value={formatEffectValue(effect.mode, effect.value)}
+                      label={formatStatLabel(effect.stat)}
+                      value={formatEffectValue(effect.mode, effect.value, effect.stat)}
                     />
                   ))}
+                  {getItemLevel(selectedItem) < maxItemLevel && (
+                    <Row
+                      label="Level 100 Bonus"
+                      value={getItemMasteryLabel(selectedSpec)}
+                      muted
+                    />
+                  )}
                 </div>
-                {equippedComparable && equippedComparable.instanceId !== selectedItem.instanceId && (
-                  <div className="compare-box">
-                    <span>Currently Equipped</span>
-                    <strong>{getItemSpec(equippedComparable)?.name ?? "Unknown Item"}</strong>
-                    <em>{itemEffectSummary(getItemSpec(equippedComparable))}</em>
-                  </div>
-                )}
                 <button
                   type="button"
                   className="equip-action"
                   disabled={!selectedCanEquip}
                   onClick={() => onEquip(selectedItem)}
                 >
-                  {selectedIsEquipped ? "Equipped" : selectedSlotView?.unlocked ? `Equip ${selectedSlotLabel}` : selectedSpec.slot ? "Slot Locked" : "Cannot Equip"}
+              {selectedIsEquipped ? "Equipped" : selectedSlotView?.unlocked ? `Equip ${selectedSlotLabel}` : selectedSpec.slot ? "Slot Locked" : "Cannot Equip"}
+                </button>
+                <button
+                  type="button"
+                  className="sell-action"
+                  disabled={!selectedCanSell}
+                  onClick={() => onSell(selectedItem)}
+                >
+                  {selectedIsEquipped ? "Equipped items cannot be sold" : selectedItem.locked ? "Locked items cannot be sold" : `Sell for ${formatGameNumber(getItemSellValue(selectedSpec, selectedItem))}g`}
                 </button>
               </>
             ) : (
               <div className="empty-state">No item selected.</div>
             )}
           </div>
+
+          <div className="inventory-total-stats-column">
+            <span className="eyebrow">Total Stats</span>
+            <h2>Hunter Totals</h2>
+            <div className="stat-table inventory-total-stat-table">
+              <Row label="Power" value={formatWhole.format(snapshot.power)} />
+              <Row label="Survival" value={formatWhole.format(snapshot.survival)} />
+              <Row label="Attack" value={formatWhole.format(snapshot.stats.attack)} />
+              <Row label="Defence" value={formatWhole.format(snapshot.stats.defence)} />
+              <Row label="Health" value={formatWhole.format(snapshot.stats.health)} />
+              <Row label="Recovery" value={`${formatOne.format(snapshot.recoveryPerSecond)} / sec`} />
+              <Row label="Speed" value={formatOne.format(snapshot.stats.speed)} />
+              <Row label="Crit Chance" value={`${formatOne.format(snapshot.stats.critChance * 100)}%`} />
+            </div>
+          </div>
+
+          <div className="inventory-resource-strip">
+            <div className="inventory-toolbar">
+              <span className="eyebrow">Materials</span>
+              <strong>{resources.length} Types</strong>
+            </div>
+            <div className="resource-mini-grid">
+                {resources.slice(0, 10).map(({ resource, amount }) => (
+                <div className="resource-mini-tile" key={resource.id} data-tooltip={resource.name}>
+                  <AssetGlyph src={getResourceAsset(resource.id)} label={resource.name} fallback={resource.name.slice(0, 1)} />
+                  <strong>{formatGameNumber(amount)}</strong>
+                </div>
+              ))}
+              {resources.length === 0 && <div className="empty-state">No materials yet.</div>}
+            </div>
+          </div>
+
+          <div className="inventory-bag-column">
+            <div className="inventory-toolbar">
+              <span className="eyebrow">Inventory</span>
+              <strong>{visibleBagItems.length} / {bagItems.length} Items</strong>
+            </div>
+            <div className="inventory-controls">
+              <div className="segmented-control" aria-label="Inventory filters">
+                {inventoryFilterOptions.map((option) => (
+                  <button
+                    type="button"
+                    key={option.id}
+                    className={inventoryFilter === option.id ? "active" : ""}
+                    onClick={() => setInventoryFilter(option.id)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <label className="inventory-sort-control">
+                <span>Sort</span>
+                <select value={inventorySort} onChange={(event) => setInventorySort(event.currentTarget.value as InventorySort)}>
+                  {inventorySortOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className={`inventory-auto-sell ${state.unlocks.autoSellDuplicates ? "unlocked" : "locked"}`}>
+              <input
+                type="checkbox"
+                disabled={!state.unlocks.autoSellDuplicates}
+                checked={state.inventory.autoSellDuplicates}
+                onChange={(event) => onSetAutoSellDuplicates(event.currentTarget.checked)}
+              />
+              <span>
+                <strong>Auto-sell duplicate gear</strong>
+                <em>{state.unlocks.autoSellDuplicates ? "Future duplicate item drops become gold." : "Unlock via achievement #11."}</em>
+              </span>
+            </label>
+            <div className="inventory-list-grid" aria-label="Equipment and usable items">
+              {visibleBagItems.map((item) => {
+                const spec = getItemSpec(item);
+                const mergeTarget = selectedItem && canMergeInventoryItems(item, selectedItem, equippedInstanceIds);
+
+                return (
+                  <button
+                    type="button"
+                    key={item.instanceId}
+                    className={`inventory-list-item ${spec ? `rarity-${spec.rarity}` : ""} ${selectedItem?.instanceId === item.instanceId ? "active" : ""} ${mergeTarget ? "merge-target" : ""} ${item.locked ? "locked-item" : ""}`}
+                    data-tooltip={spec ? `${spec.name} / Level ${getItemLevel(item)}${item.locked ? " / Locked" : ""}` : "Unknown Item"}
+                    draggable={Boolean(spec?.slot)}
+                    onDragStart={(event) => handleItemDragStart(event, item)}
+                    onDragOver={(event) => handleItemDragOver(event, item)}
+                    onDrop={(event) => handleItemDrop(event, item)}
+                    onClick={(event) => handleInventoryItemClick(event, item)}
+                  >
+                    <AssetGlyph src={getItemAsset(spec?.id)} label={spec?.name} fallback={spec?.name.slice(0, 1) ?? "?"} />
+                    {getItemLevel(item) > 1 && <span className="item-level-pill">{getItemLevel(item)}</span>}
+                    {item.locked && <Lock className="item-lock-pill" size={12} aria-hidden="true" />}
+                    <span className="sr-only">{spec ? `${spec.name}, ${spec.rarity}, tier ${spec.tier}, level ${getItemLevel(item)}` : "Unknown Item"}</span>
+                  </button>
+                );
+              })}
+              {visibleBagItems.length === 0 && <div className="empty-state inventory-empty-state">No matching items.</div>}
+            </div>
+          </div>
         </div>
       </section>
-      <DropsPanel state={state} className="inventory-materials-panel" />
     </>
   );
 }
@@ -847,9 +1493,7 @@ function BattleStage({ snapshot, xpPercent }: { snapshot: ReturnType<typeof getS
         </div>
         <div className="battle-portrait hunter-portrait">
           <div className="portrait-backdrop" />
-          <div className="portrait-ring">
-            <Swords size={58} />
-          </div>
+          <img className="portrait-image hunter-image" src={hunterPortraitAsset} alt="Hunter portrait" />
         </div>
         <div className="battle-bars">
           <BattleBar label="Hunter HP" value={`${formatWhole.format(Math.ceil(hunterHp))} / ${formatWhole.format(Math.ceil(hunterMaxHp))}`} percent={hunterHealthPercent} tone="green" />
@@ -882,7 +1526,9 @@ function BattleStage({ snapshot, xpPercent }: { snapshot: ReturnType<typeof getS
         </div>
         <div className={`battle-portrait enemy-portrait ${isBoss ? "enemy-portrait-boss" : ""} ${!target ? "enemy-portrait-empty" : ""} ${isDefeated ? "enemy-portrait-defeated" : ""}`}>
           {isBoss && <div className="boss-portrait-banner">Boss</div>}
-          {target ? (
+          {target && getMonsterAsset(target.id) ? (
+            <img className="portrait-image monster-image" src={getMonsterAsset(target.id)} alt={`${target.name} portrait`} />
+          ) : target ? (
             <div className="monster-art battle-monster-art" aria-hidden="true">
               <div className="monster-tail" />
               <div className="monster-spine" />
@@ -931,6 +1577,9 @@ function SpoilsCard({ reward }: { reward?: ReturnType<typeof getSnapshot>["lastR
   const items = (reward?.itemIds ?? [])
     .map((itemId) => gameContent.items.find((item) => item.id === itemId))
     .filter((item): item is (typeof gameContent.items)[number] => Boolean(item));
+  const autoSoldItems = (reward?.autoSoldItemIds ?? [])
+    .map((itemId) => gameContent.items.find((item) => item.id === itemId))
+    .filter((item): item is (typeof gameContent.items)[number] => Boolean(item));
 
   return (
     <div className={`spoils-card ${reward ? "" : "spoils-card-empty"}`}>
@@ -941,13 +1590,16 @@ function SpoilsCard({ reward }: { reward?: ReturnType<typeof getSnapshot>["lastR
         <div><span>Gold</span><b>{reward ? formatGameNumber(reward.gold) : "0"}</b></div>
         <div><span>Area</span><b>{reward ? `+${formatWhole.format(reward.progress)}` : "+0"}</b></div>
       </div>
-      {(resources.length > 0 || items.length > 0) && (
+      {(resources.length > 0 || items.length > 0 || autoSoldItems.length > 0) && (
         <div className="spoils-drops">
           {resources.slice(0, 2).map(({ resource, amount }) => (
             <em key={resource.id}>{formatGameNumber(amount)} {resource.name}</em>
           ))}
           {items.slice(0, 1).map((item) => (
             <em key={item.id}>{item.name}</em>
+          ))}
+          {autoSoldItems.slice(0, 1).map((item) => (
+            <em key={`sold-${item.id}`}>Sold {item.name} +{formatGameNumber(reward?.autoSoldGold ?? 0)}g</em>
           ))}
         </div>
       )}
@@ -972,13 +1624,13 @@ function AreaCard({ snapshot, state, onSelectArea }: { snapshot: ReturnType<type
   const progressPercent = (areaState.progress / snapshot.currentArea.progressRequired) * 100;
   const nextArea = gameContent.areas.find((area) => area.id === snapshot.currentArea.unlocksAreaId);
   const nextAreaState = nextArea ? state.areas[nextArea.id] : undefined;
-  const visibleAreas = gameContent.areas.filter((area) => state.areas[area.id]?.visible);
+  const areaAsset = getAreaAsset(snapshot.currentArea.id);
 
   return (
     <article className="area-card">
       <span className="eyebrow">Current Area</span>
       <h2>{snapshot.currentArea.name}</h2>
-      <div className="area-landscape">
+      <div className={`area-landscape ${areaAsset ? "area-landscape-image" : ""}`} style={areaAsset ? { backgroundImage: `url(${areaAsset})` } : undefined}>
         <div className="tree-line" />
         <div className="mist-line" />
       </div>
@@ -997,14 +1649,17 @@ function AreaCard({ snapshot, state, onSelectArea }: { snapshot: ReturnType<type
         <em>{nextArea ? nextAreaState?.unlocked ? "Open" : "Boss gate" : "Spend renown for permanent power."}</em>
       </div>
       <div className="area-selector">
-        {visibleAreas.map((area) => {
+        {gameContent.areas.map((area) => {
           const selectableAreaState = state.areas[area.id];
+          const visible = Boolean(selectableAreaState?.visible);
           const selectableProgress = Math.min(100, (selectableAreaState.progress / area.progressRequired) * 100);
           const active = area.id === snapshot.currentArea.id;
           const unlocked = selectableAreaState.unlocked;
           const outclassed = unlocked && !selectableAreaState.bossDefeated && snapshot.power < area.powerBand[0] * 0.78;
           const statusLabel = active
             ? "Exploring"
+            : !visible
+              ? "Unknown"
             : !unlocked
               ? "Locked"
               : selectableAreaState.bossDefeated
@@ -1017,12 +1672,13 @@ function AreaCard({ snapshot, state, onSelectArea }: { snapshot: ReturnType<type
             <button
               key={area.id}
               type="button"
-              className={`area-select-card ${active ? "active" : ""} ${unlocked ? "unlocked" : "locked"} ${outclassed ? "outclassed" : ""}`}
+              className={`area-select-card ${active ? "active" : ""} ${visible ? "visible" : "unknown"} ${unlocked ? "unlocked" : "locked"} ${outclassed ? "outclassed" : ""}`}
               disabled={!unlocked}
               onClick={() => onSelectArea(area.id)}
+              data-tooltip={!visible ? "Unexplored area. Push deeper to reveal it." : unlocked ? area.name : "Defeat the previous boss to unlock this area."}
             >
               <span>{unlocked ? `T${area.tier}` : <Lock size={13} />}</span>
-              <strong>{area.name}</strong>
+              <strong>{visible ? area.name : "?????"}</strong>
               <em>{statusLabel}</em>
               <div className="area-select-progress"><i style={{ width: `${selectableProgress}%` }} /></div>
             </button>
@@ -1121,63 +1777,49 @@ function UnlockNoticePanel({ notices }: { notices: ReturnType<typeof getSnapshot
 
 function TrainingPanel({
   state,
-  purchaseAmount = 1,
-  onSetPurchaseAmount,
   onTrain,
   bare = false
 }: {
   state: GameState;
-  purchaseAmount?: TrainingPurchaseAmount;
-  onSetPurchaseAmount?: (amount: TrainingPurchaseAmount) => void;
   onTrain: (trainingId: TrainingId) => void;
   bare?: boolean;
 }) {
   const content = (
     <>
-      {onSetPurchaseAmount && (
-        <div className="training-toolbar">
-          <span>Buy</span>
-          {([1, 10, "max"] as TrainingPurchaseAmount[]).map((amount) => (
-            <button
-              key={String(amount)}
-              type="button"
-              className={purchaseAmount === amount ? "active" : ""}
-              onClick={() => onSetPurchaseAmount(amount)}
-            >
-              {amount === "max" ? "Max" : `x${amount}`}
-            </button>
-          ))}
-        </div>
-      )}
       <div className="training-list">
         {trainingSpecs.map((training) => {
-          const cost = getTrainingCost(state, training.id);
-          const affordable = canBuyTraining(state, training.id);
           const level = state.training?.[training.id]?.level ?? 0;
-          const purchases = purchaseAmount === "max"
-            ? getAffordableTrainingPurchases(state, training.id)
-            : Math.min(purchaseAmount, getAffordableTrainingPurchases(state, training.id, purchaseAmount));
-          const purchaseCost = purchases > 0 ? getTrainingPurchaseCost(state, training.id, purchases) : cost;
+          const progressPercent = getTrainingProgressPercent(state, training.id);
+          const active = state.activeTrainingId === training.id;
           const nextGain = getNextTrainingGain(state, training.id);
           const milestoneBonus = getTrainingMilestoneBonus(level);
+          const remaining = getTrainingSecondsRemaining(state, training.id);
+          const duration = getTrainingDuration(state, training.id);
 
           return (
-            <article className="training-row" key={training.id}>
+            <article className={`training-row ${active ? "active" : ""}`} key={training.id}>
               <div className="training-copy">
                 <strong>{training.name}</strong>
                 <span>{training.description}</span>
               </div>
               <div className="training-level">
                 <span>Level</span>
-                <strong>{level}{purchases > 0 ? ` -> ${level + purchases}` : ""}</strong>
+                <strong>{formatWhole.format(level)}</strong>
               </div>
               <div className="training-level">
                 <span>Next Gain</span>
                 <strong>{formatTrainingGain(training.stat, nextGain)}</strong>
                 {milestoneBonus > 0 && <em>+{formatOne.format(milestoneBonus * 100)}% milestone</em>}
               </div>
-              <button disabled={!affordable} onClick={() => onTrain(training.id)}>
-                {purchases > 1 ? `Buy ${purchases} (${formatGameNumber(purchaseCost)}g)` : formatGameNumber(cost)}
+              <div className="training-progress-cell">
+                <div className="training-progress-copy">
+                  <span>{active ? "Training" : "Ready"}</span>
+                  <strong>{active ? formatDuration(remaining) : formatDuration(duration / getTrainingRate(state))}</strong>
+                </div>
+                <div className="tiny-progress blue"><span style={{ width: `${progressPercent}%` }} /></div>
+              </div>
+              <button className={active ? "active" : ""} onClick={() => onTrain(training.id)}>
+                {active ? "Active" : "Train"}
               </button>
             </article>
           );
@@ -1242,7 +1884,7 @@ function DropsPanel({ state, className = "" }: { state: GameState; className?: s
       <div className="drop-grid">
         {resources.slice(0, 8).map(({ resource, amount }) => (
           <div className="drop-tile" key={resource.id}>
-            <div className="item-glyph">{resource.name.slice(0, 1)}</div>
+            <AssetGlyph src={getResourceAsset(resource.id)} label={resource.name} fallback={resource.name.slice(0, 1)} />
             <strong>{formatGameNumber(amount)}</strong>
             <span>{resource.name}</span>
           </div>
@@ -1250,6 +1892,14 @@ function DropsPanel({ state, className = "" }: { state: GameState; className?: s
         {resources.length === 0 && <div className="empty-state">No materials yet.</div>}
       </div>
     </section>
+  );
+}
+
+function AssetGlyph({ src, label, fallback }: { src?: string; label?: string; fallback: string }) {
+  return (
+    <div className={`item-glyph ${src ? "item-glyph-image" : ""}`}>
+      {src ? <img src={src} alt={label ?? ""} /> : fallback}
+    </div>
   );
 }
 
@@ -1314,7 +1964,7 @@ function InventoryPanel({ state, selectedItem, onEquip }: { state: GameState; se
             const spec = gameContent.items.find((entry) => entry.id === item.itemId);
             return (
               <button className="item-cell" key={item.instanceId} onClick={() => onEquip(item)}>
-                <div className="item-glyph">{spec?.name.slice(0, 1) ?? "?"}</div>
+                <AssetGlyph src={getItemAsset(spec?.id)} label={spec?.name} fallback={spec?.name.slice(0, 1) ?? "?"} />
               </button>
             );
           })}
@@ -1344,9 +1994,9 @@ function InventoryPanel({ state, selectedItem, onEquip }: { state: GameState; se
   );
 }
 
-function NavRow({ icon, label, active, badge, disabled, onClick }: { icon: React.ReactNode; label: string; active?: boolean; badge?: string; disabled?: boolean; onClick?: () => void }) {
+function NavRow({ icon, label, active, badge, disabled, child, onClick }: { icon: React.ReactNode; label: string; active?: boolean; badge?: string; disabled?: boolean; child?: boolean; onClick?: () => void }) {
   return (
-    <button className={`nav-row ${active ? "active" : ""}`} disabled={disabled} onClick={onClick} type="button">
+    <button className={`nav-row ${active ? "active" : ""} ${child ? "child" : ""}`} disabled={disabled} onClick={onClick} type="button">
       {icon}
       <span>{label}</span>
       {badge && <b>{badge}</b>}
@@ -1366,6 +2016,184 @@ function ResourcePill({ icon, label, value }: { icon: React.ReactNode; label: st
   );
 }
 
+function createDebugSkipState(current: GameState, skipId: DebugSkipId): GameState {
+  const state = createGame(current.updatedAt);
+
+  if (skipId === "fresh") {
+    return state;
+  }
+
+  state.hunt.huntsCompleted = 1;
+  state.resources["green-herb"] = gameNumber(2);
+
+  if (skipId === "training") {
+    state.activeTrainingId = "might";
+    return advanceRealtime(state, 0);
+  }
+
+  addDebugInventory(state);
+
+  if (skipId === "inventory") {
+    state.player.gold = gameNumber(2500);
+    state.training.might.level = 4;
+    state.training.vigor.level = 3;
+    return advanceRealtime(state, 0);
+  }
+
+  makeDebugAreaBossReady(state, "emberfall-woods");
+  state.player.baseStats.attack = 165;
+  state.player.baseStats.health = 900;
+  state.player.baseStats.defence = 55;
+  state.hunt.hunterHp = 900;
+
+  if (skipId === "emberBoss") {
+    return advanceRealtime(state, 0);
+  }
+
+  unlockDebugArea(state, "ironroot-basin");
+  state.areas["emberfall-woods"].bossDefeated = true;
+  state.hunt.selectedAreaId = "ironroot-basin";
+
+  if (skipId === "ironroot") {
+    return advanceRealtime(state, 0);
+  }
+
+  for (const area of gameContent.areas) {
+    unlockDebugArea(state, area.id);
+    state.areas[area.id].bossUnlocked = true;
+    state.areas[area.id].bossDefeated = true;
+    state.areas[area.id].progress = area.progressRequired;
+  }
+  state.hunt.selectedAreaId = "moonfen-ruins";
+  state.player.renown = gameNumber(500);
+  state.player.gold = gameNumber(50000);
+  state.player.baseStats.attack = 900;
+  state.player.baseStats.health = 5500;
+  state.player.baseStats.defence = 420;
+  state.hunt.hunterHp = 5500;
+
+  if (skipId === "prestigeReady") {
+    return advanceRealtime(state, 0);
+  }
+
+  state.player.prestige = 1;
+  state.player.renown = gameNumber(0);
+  state.player.gold = gameNumber(12000);
+  state.settlement = {
+    foundedAtPrestige: 1,
+    seasonsPassed: 4,
+    population: 18,
+    stores: 9,
+    outpostScouts: 4,
+    forgeHeat: 11
+  };
+  state.hunt.selectedAreaId = "emberfall-woods";
+
+  return advanceRealtime(state, 0);
+}
+
+function grantDebugCurrency(state: GameState, currency: "gold" | "renown", amount: number): GameState {
+  state.player[currency] = gameNumber(toFiniteNumber(state.player[currency]) + amount);
+  return state;
+}
+
+function grantDebugBankedTime(state: GameState, seconds: number): GameState {
+  state.time.bankedSeconds += seconds;
+  return state;
+}
+
+function addDebugInventory(state: GameState): GameState {
+  const itemIds = gameContent.items.map((item) => item.id);
+  const existingDebugItems = new Set(state.inventory.items.filter((item) => item.instanceId.startsWith("debug-")).map((item) => item.instanceId));
+
+  itemIds.forEach((itemId, index) => {
+    const level = [1, 2, 5, 12, 25, 50, 100][index % 7];
+    const instanceId = `debug-${itemId}-${index}`;
+    if (!existingDebugItems.has(instanceId)) {
+      state.inventory.items.push({
+        instanceId,
+        itemId,
+        acquiredAt: state.updatedAt + index + 1,
+        level,
+        locked: index % 5 === 0
+      });
+    }
+  });
+
+  gameContent.resources.forEach((resource, index) => {
+    state.resources[resource.id] = gameNumber(250 + index * 75);
+  });
+
+  state.inventory.equipped.weapon = state.inventory.items.find((item) => item.itemId === "bramblemaw-cleaver")?.instanceId ?? state.inventory.equipped.weapon;
+  state.inventory.equipped.armor = state.inventory.items.find((item) => item.itemId === "ironroot-hauberk")?.instanceId ?? state.inventory.equipped.armor;
+  state.inventory.equipped.charm = state.inventory.items.find((item) => item.itemId === "matriarch-signet")?.instanceId ?? state.inventory.equipped.charm;
+
+  return state;
+}
+
+function setDebugSettlementUnlocked(state: GameState, unlocked: boolean): GameState {
+  if (!unlocked) {
+    state.player.prestige = 0;
+    state.settlement = {
+      foundedAtPrestige: undefined,
+      seasonsPassed: 0,
+      population: 0,
+      stores: 0,
+      outpostScouts: 0,
+      forgeHeat: 0
+    };
+    return state;
+  }
+
+  state.player.prestige = Math.max(1, state.player.prestige);
+  state.settlement.foundedAtPrestige ??= 1;
+  state.settlement.seasonsPassed = Math.max(1, state.settlement.seasonsPassed);
+  state.settlement.population = Math.max(6, state.settlement.population);
+  state.settlement.stores = Math.max(3, state.settlement.stores);
+  state.settlement.outpostScouts = Math.max(1, state.settlement.outpostScouts);
+  state.settlement.forgeHeat = Math.max(3, state.settlement.forgeHeat);
+
+  return state;
+}
+
+function setDebugAllAreasUnlocked(state: GameState, unlocked: boolean): GameState {
+  if (!unlocked) {
+    const fresh = createGame(state.updatedAt);
+    state.areas = fresh.areas;
+    state.hunt.selectedAreaId = "emberfall-woods";
+    return state;
+  }
+
+  for (const area of gameContent.areas) {
+    unlockDebugArea(state, area.id);
+  }
+
+  return state;
+}
+
+function makeDebugAreaBossReady(state: GameState, areaId: string): void {
+  const area = gameContent.areas.find((entry) => entry.id === areaId);
+  if (!area) {
+    return;
+  }
+
+  unlockDebugArea(state, area.id);
+  state.hunt.selectedAreaId = area.id;
+  state.areas[area.id].progress = area.progressRequired;
+  state.areas[area.id].bossUnlocked = true;
+  state.areas[area.id].bossDefeated = false;
+}
+
+function unlockDebugArea(state: GameState, areaId: string): void {
+  const areaState = state.areas[areaId];
+  if (!areaState) {
+    return;
+  }
+
+  areaState.visible = true;
+  areaState.unlocked = true;
+}
+
 function Metric({ icon, label, value, delta }: { icon: React.ReactNode; label: string; value: string; delta: string }) {
   return (
     <div className="metric-card">
@@ -1377,9 +2205,9 @@ function Metric({ icon, label, value, delta }: { icon: React.ReactNode; label: s
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
   return (
-    <div className="stat-row">
+    <div className={`stat-row ${muted ? "muted" : ""}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -1430,19 +2258,100 @@ function getItemSpec(item?: InventoryItem): ItemSpec | undefined {
   return item ? gameContent.items.find((entry) => entry.id === item.itemId) : undefined;
 }
 
-function itemEffectSummary(spec?: ItemSpec): string {
-  if (!spec) {
-    return "";
-  }
-
-  return spec.effects
-    .slice(0, 2)
-    .map((effect) => `${effect.stat} ${formatEffectValue(effect.mode, effect.value)}`)
-    .join(", ");
+function canMergeInventoryItems(targetItem: InventoryItem, sourceItem: InventoryItem, equippedInstanceIds: (string | undefined)[]): boolean {
+  return targetItem.instanceId !== sourceItem.instanceId
+    && targetItem.itemId === sourceItem.itemId
+    && !sourceItem.locked
+    && !equippedInstanceIds.includes(sourceItem.instanceId)
+    && getItemLevel(targetItem) < maxItemLevel
+    && getItemLevel(sourceItem) < maxItemLevel;
 }
 
-function formatEffectValue(mode: "flat" | "percent", value: number): string {
-  if (mode === "percent") {
+function inventoryItemMatchesFilter(item: InventoryItem, filter: InventoryFilter, bagItems: InventoryItem[]): boolean {
+  const spec = getItemSpec(item);
+
+  if (filter === "all") {
+    return true;
+  }
+
+  if (filter === "locked") {
+    return item.locked;
+  }
+
+  if (filter === "upgradable") {
+    return getItemLevel(item) < maxItemLevel && bagItems.some((entry) => (
+      entry.instanceId !== item.instanceId
+      && entry.itemId === item.itemId
+      && !entry.locked
+      && getItemLevel(entry) < maxItemLevel
+    ));
+  }
+
+  return spec?.slot === filter;
+}
+
+function compareInventoryItems(left: InventoryItem, right: InventoryItem, sort: InventorySort): number {
+  const leftSpec = getItemSpec(left);
+  const rightSpec = getItemSpec(right);
+
+  if (sort === "strongest") {
+    return getComparableItemScore(rightSpec, right) - getComparableItemScore(leftSpec, left);
+  }
+
+  if (sort === "level") {
+    return getItemLevel(right) - getItemLevel(left) || right.acquiredAt - left.acquiredAt;
+  }
+
+  if (sort === "rarity") {
+    return getRarityRank(rightSpec) - getRarityRank(leftSpec) || getItemLevel(right) - getItemLevel(left);
+  }
+
+  if (sort === "name") {
+    return (leftSpec?.name ?? "").localeCompare(rightSpec?.name ?? "") || right.acquiredAt - left.acquiredAt;
+  }
+
+  return right.acquiredAt - left.acquiredAt;
+}
+
+function getComparableItemScore(spec: ItemSpec | undefined, item: InventoryItem): number {
+  return spec ? getItemGearScore(spec, item) : 0;
+}
+
+function getRarityRank(spec?: ItemSpec): number {
+  if (spec?.rarity === "rare") {
+    return 3;
+  }
+
+  if (spec?.rarity === "uncommon") {
+    return 2;
+  }
+
+  return 1;
+}
+
+function getTrainingSpecName(trainingId: TrainingId): string {
+  return trainingSpecs.find((training) => training.id === trainingId)?.name ?? "Training";
+}
+
+function formatStatLabel(stat: string): string {
+  const labels: Record<string, string> = {
+    attack: "Attack",
+    defence: "Defence",
+    health: "Health",
+    speed: "Speed",
+    critChance: "Crit Chance",
+    luck: "Luck",
+    recoveryRate: "Recovery",
+    goldFind: "Gold Find",
+    xpGain: "XP Gain",
+    materialFind: "Material Find"
+  };
+
+  return labels[stat] ?? stat;
+}
+
+function formatEffectValue(mode: "flat" | "percent", value: number, stat?: string): string {
+  if (mode === "percent" || stat === "critChance" || stat === "recoveryRate") {
     return `${value >= 0 ? "+" : ""}${formatOne.format(value * 100)}%`;
   }
 

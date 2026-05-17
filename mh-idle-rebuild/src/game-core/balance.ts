@@ -1,5 +1,7 @@
 import { getTrainingBonus, trainingSpecs } from "./training";
 import { getActiveChallengeStatMultiplier, getChallengeStatMultiplier, isEquipmentSlotEnabled } from "./challenges";
+import { getAchievementRewardMultiplier, getAchievementStatMultiplier } from "./achievements";
+import { getLeveledItemEffects } from "./items";
 import { floor, multiply, toFiniteNumber } from "./numbers";
 import type { GameContent, GameState, MonsterSpec, StatBlock } from "./types";
 
@@ -60,7 +62,7 @@ export function getHunterStats(state: GameState, content: GameContent): StatBloc
       continue;
     }
 
-    for (const effect of spec.effects) {
+    for (const effect of getLeveledItemEffects(spec, instance)) {
       if (effect.stat === "goldFind" || effect.stat === "xpGain" || effect.stat === "materialFind") {
         continue;
       }
@@ -77,7 +79,7 @@ export function getHunterStats(state: GameState, content: GameContent): StatBloc
     stats[stat] *= 1 + percent;
   }
 
-  const prestigeMultiplier = getPrestigeStatMultiplier(state);
+  const prestigeMultiplier = getPrestigeStatMultiplier(state) * getAchievementStatMultiplier(state);
   stats.health *= prestigeMultiplier;
   stats.attack *= prestigeMultiplier;
   stats.defence *= prestigeMultiplier;
@@ -101,7 +103,15 @@ export function getRewardModifier(
   content: GameContent,
   stat: "goldFind" | "xpGain" | "materialFind"
 ): number {
-  let total = getPrestigeRewardMultiplier(state);
+  let total = getPrestigeRewardMultiplier(state) * getAchievementRewardMultiplier(state);
+
+  if (stat === "goldFind") {
+    total += (state.settlement?.stores ?? 0) * 0.0025;
+  }
+
+  if (stat === "materialFind") {
+    total += (state.settlement?.outpostScouts ?? 0) * 0.003;
+  }
 
   for (const instanceId of Object.values(state.inventory.equipped)) {
     const instance = state.inventory.items.find((item) => item.instanceId === instanceId);
@@ -110,7 +120,7 @@ export function getRewardModifier(
       continue;
     }
 
-    for (const effect of spec.effects) {
+    for (const effect of getLeveledItemEffects(spec, instance)) {
       if (effect.stat === stat) {
         total += effect.value;
       }

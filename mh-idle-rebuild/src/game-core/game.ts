@@ -19,6 +19,15 @@ import {
 } from "./balance";
 import { gameContent } from "./content/content";
 import {
+  achievementSpecs,
+  createAchievementRecords,
+  getAchievementRewardMultiplier,
+  getAchievementStatMultiplier,
+  getCompletedAchievementCount,
+  reviveAchievementRecords,
+  refreshAchievements
+} from "./achievements";
+import {
   createChallengeRecords,
   getChallengeCompletionLevel,
   getChallengeElapsedSeconds,
@@ -29,9 +38,10 @@ import {
   reviveChallengeRecords
 } from "./challenges";
 import { add, floor, gameNumber, greaterThanOrEqual, multiply, subtract } from "./numbers";
-import { canBuyTraining, createTrainingState, getAffordableTrainingPurchases, getTrainingCost } from "./training";
+import { advanceTrainingProgress, createTrainingState, getTrainingSpec } from "./training";
 import { getFeatureUnlocks, getUnlockNotices } from "./unlocks";
-import type { AreaSpec, AreaState, ChallengeLevel, GameContent, GameSnapshot, GameState, InventoryItem, LootEntry, MonsterSpec, OfflineSummary, RewardSummary, SpeedMultiplier, TimeState, TimeUpgradeId, TrainingId } from "./types";
+import { getItemGearScoreTotal, getItemLevel, getItemSellValue, maxItemLevel } from "./items";
+import type { AreaSpec, AreaState, ChallengeLevel, GameContent, GameSnapshot, GameState, InventoryItem, LootEntry, MonsterSpec, OfflineSummary, RewardSummary, SettlementState, SpeedMultiplier, TimeState, TimeUpgradeId, TrainingId } from "./types";
 
 const initialAreaId = "emberfall-woods";
 const timeEpsilon = 0.000001;
@@ -74,22 +84,31 @@ export function createGame(now = 0): GameState {
         {
           instanceId: "starter-blade-1",
           itemId: "scuffed-hunter-blade",
-          acquiredAt: now
+          acquiredAt: now,
+          level: 1,
+          locked: false
         }
       ],
       equipped: {
         weapon: "starter-blade-1"
-      }
+      },
+      autoSellDuplicates: false
     },
     training: createTrainingState(),
     resources: {},
     time: createTimeState(now),
+    achievements: {
+      records: createAchievementRecords(),
+      secretTokens: 0
+    },
     challenges: {
       records: createChallengeRecords()
     },
+    settlement: createSettlementState(),
     unlocks: {
       autoBoss: false,
-      autoAdvanceArea: false
+      autoAdvanceArea: false,
+      autoSellDuplicates: false
     }
   };
 }
@@ -99,6 +118,7 @@ export function tick(input: GameState, seconds: number, content = gameContent): 
   const elapsedSeconds = Math.max(0, seconds);
   const targetTime = state.updatedAt + elapsedSeconds;
   state.hunt.activeSeconds += elapsedSeconds;
+  advanceTrainingProgress(state, elapsedSeconds);
 
   while (state.updatedAt < targetTime - timeEpsilon) {
     if (state.hunt.phase === "fighting") {
@@ -117,7 +137,7 @@ export function tick(input: GameState, seconds: number, content = gameContent): 
     advancePhase(state, content);
   }
 
-  return state;
+  return refreshAchievements(state);
 }
 
 export function advanceRealtime(input: GameState, realSeconds: number, content = gameContent): GameState {
@@ -128,9 +148,10 @@ export function advanceRealtime(input: GameState, realSeconds: number, content =
   const spentBankedSeconds = Math.min(state.time.bankedSeconds, requestedBankedSeconds);
   const advanced = tick(state, elapsedSeconds + spentBankedSeconds, content);
 
-  advanced.time.bankedSeconds = roundTime(Math.max(0, state.time.bankedSeconds - spentBankedSeconds));
+  const achievementBankedSeconds = Math.max(0, advanced.time.bankedSeconds - state.time.bankedSeconds);
+  advanced.time.bankedSeconds = roundTime(Math.max(0, state.time.bankedSeconds + achievementBankedSeconds - spentBankedSeconds));
   advanced.time.speedMultiplier = spentBankedSeconds < requestedBankedSeconds ? 1 : speedMultiplier;
-  return advanced;
+  return refreshAchievements(advanced);
 }
 
 export function setTimeSpeed(input: GameState, speedMultiplier: SpeedMultiplier): GameState {
@@ -159,8 +180,9 @@ export function spendBankedTime(input: GameState, seconds: number, content = gam
   }
 
   const advanced = tick(state, spentSeconds, content);
-  advanced.time.bankedSeconds = roundTime(Math.max(0, state.time.bankedSeconds - spentSeconds));
-  return advanced;
+  const achievementBankedSeconds = Math.max(0, advanced.time.bankedSeconds - state.time.bankedSeconds);
+  advanced.time.bankedSeconds = roundTime(Math.max(0, state.time.bankedSeconds + achievementBankedSeconds - spentSeconds));
+  return refreshAchievements(advanced);
 }
 
 export function bankOfflineTime(input: GameState, now = Date.now() / 1000): GameState {
@@ -208,7 +230,7 @@ export function buyTimeUpgrade(input: GameState, upgradeId: TimeUpgradeId): Game
   const state = cloneState(input);
 
   if (!canBuyTimeUpgrade(state, upgradeId)) {
-    return state;
+    return refreshAchievements(state);
   }
 
   const cost = getTimeUpgradeCost(state, upgradeId);
@@ -218,7 +240,7 @@ export function buyTimeUpgrade(input: GameState, upgradeId: TimeUpgradeId): Game
     state.time.offlineEfficiencyLevel += 1;
   }
 
-  return state;
+  return refreshAchievements(state);
 }
 
 export function selectArea(input: GameState, areaId: string, content = gameContent): GameState {
@@ -226,11 +248,11 @@ export function selectArea(input: GameState, areaId: string, content = gameConte
   const area = getArea(content, areaId);
 
   if (!state.areas[area.id]?.visible || !state.areas[area.id]?.unlocked) {
-    return state;
+    return refreshAchievements(state);
   }
 
   moveToArea(state, area.id);
-  return state;
+  return refreshAchievements(state);
 }
 
 export function attemptBoss(input: GameState, content = gameContent): GameState {
@@ -240,11 +262,11 @@ export function attemptBoss(input: GameState, content = gameContent): GameState 
   const boss = getMonster(content, area.bossId);
 
   if (!areaState.bossUnlocked || areaState.bossDefeated) {
-    return state;
+    return refreshAchievements(state);
   }
 
   if (state.hunt.phase === "fighting" && state.hunt.targetMonsterId === boss.id) {
-    return state;
+    return refreshAchievements(state);
   }
 
   if (!canAttemptBossAtCurrentHealth(state, content)) {
@@ -265,7 +287,7 @@ export function startChallenge(input: GameState, challengeId: string, content = 
   const challenge = getChallengeSpec(challengeId);
 
   if (!challenge || state.challenges.active || !isChallengeUnlocked(state, challenge)) {
-    return state;
+    return refreshAchievements(state);
   }
 
   const next = createGame(state.updatedAt);
@@ -279,11 +301,17 @@ export function startChallenge(input: GameState, challengeId: string, content = 
       startedAt: state.updatedAt
     }
   };
+  next.achievements = {
+    records: state.achievements.records,
+    secretTokens: state.achievements.secretTokens
+  };
   next.unlocks = {
     ...next.unlocks,
     autoBoss: isChallengeSystemEnabled(next, "autoBoss") ? state.unlocks.autoBoss : false,
-    autoAdvanceArea: isChallengeSystemEnabled(next, "autoAdvance") ? state.unlocks.autoAdvanceArea : false
+    autoAdvanceArea: isChallengeSystemEnabled(next, "autoAdvance") ? state.unlocks.autoAdvanceArea : false,
+    autoSellDuplicates: state.unlocks.autoSellDuplicates
   };
+  next.inventory.autoSellDuplicates = state.unlocks.autoSellDuplicates && state.inventory.autoSellDuplicates;
   next.time = {
     ...state.time,
     speedMultiplier: 1,
@@ -293,14 +321,14 @@ export function startChallenge(input: GameState, challengeId: string, content = 
   };
   next.hunt.hunterHp = getHunterCombatHealth(getHunterStats(next, content));
 
-  return next;
+  return refreshAchievements(next);
 }
 
 export function abandonChallenge(input: GameState): GameState {
   const state = cloneState(input);
 
   if (!state.challenges.active) {
-    return state;
+    return refreshAchievements(state);
   }
 
   const next = createGame(state.updatedAt);
@@ -309,6 +337,10 @@ export function abandonChallenge(input: GameState): GameState {
   next.player.prestige = state.player.prestige;
   next.challenges = {
     records: state.challenges.records
+  };
+  next.achievements = {
+    records: state.achievements.records,
+    secretTokens: state.achievements.secretTokens
   };
   next.unlocks = {
     ...next.unlocks,
@@ -322,7 +354,7 @@ export function abandonChallenge(input: GameState): GameState {
     lastBankedSeconds: 0
   };
 
-  return next;
+  return refreshAchievements(next);
 }
 
 export function prestigeRun(input: GameState): GameState {
@@ -330,13 +362,14 @@ export function prestigeRun(input: GameState): GameState {
   const prestigeGain = getPrestigeGain(state);
 
   if (!canPrestigeRun(state)) {
-    return state;
+    return refreshAchievements(state);
   }
 
   const next = createGame(state.updatedAt);
   next.createdAt = state.createdAt;
   next.rngSeed = state.rngSeed;
   next.player.prestige = state.player.prestige + prestigeGain;
+  next.settlement = advanceSettlementForPrestige(state.settlement, next.player.prestige, prestigeGain);
   next.unlocks = {
     ...next.unlocks,
     ...state.unlocks
@@ -352,8 +385,20 @@ export function prestigeRun(input: GameState): GameState {
   next.challenges = {
     records: state.challenges.records
   };
+  next.achievements = {
+    records: state.achievements.records,
+    secretTokens: state.achievements.secretTokens
+  };
 
-  return next;
+  return refreshAchievements(next);
+}
+
+export function getSettlementBonuses(settlement: SettlementState): { trainingRate: number; goldFind: number; materialFind: number } {
+  return {
+    trainingRate: 1 + settlement.seasonsPassed * 0.01,
+    goldFind: 1 + settlement.stores * 0.0025,
+    materialFind: 1 + settlement.outpostScouts * 0.003
+  };
 }
 
 export function canPrestigeRun(state: GameState, content = gameContent): boolean {
@@ -369,31 +414,74 @@ export function equipItem(input: GameState, instanceId: string, content = gameCo
     state.inventory.equipped[spec.slot] = instanceId;
   }
 
-  return state;
+  return refreshAchievements(state);
 }
 
-export function buyTraining(input: GameState, trainingId: TrainingId, requestedPurchases: number | "max" = 1): GameState {
+export function sellItem(input: GameState, instanceId: string, content = gameContent): GameState {
+  const state = cloneState(input);
+  const itemIndex = state.inventory.items.findIndex((item) => item.instanceId === instanceId);
+  const instance = state.inventory.items[itemIndex];
+  const spec = instance ? content.items.find((item) => item.id === instance.itemId) : undefined;
+
+  if (itemIndex < 0 || !spec || instance.locked || Object.values(state.inventory.equipped).includes(instanceId)) {
+    return refreshAchievements(state);
+  }
+
+  state.inventory.items.splice(itemIndex, 1);
+  state.player.gold = add(state.player.gold, gameNumber(getItemSellValue(spec, instance)));
+
+  return refreshAchievements(state);
+}
+
+export function mergeItem(input: GameState, targetInstanceId: string, sourceInstanceId: string): GameState {
   const state = cloneState(input);
 
-  if (!canBuyTraining(state, trainingId)) {
-    return state;
+  if (targetInstanceId === sourceInstanceId || Object.values(state.inventory.equipped).includes(sourceInstanceId)) {
+    return refreshAchievements(state);
   }
 
-  const purchases = requestedPurchases === "max"
-    ? getAffordableTrainingPurchases(state, trainingId)
-    : Math.max(1, Math.floor(requestedPurchases));
+  const target = state.inventory.items.find((item) => item.instanceId === targetInstanceId);
+  const sourceIndex = state.inventory.items.findIndex((item) => item.instanceId === sourceInstanceId);
+  const source = state.inventory.items[sourceIndex];
 
-  for (let purchase = 0; purchase < purchases; purchase += 1) {
-    if (!canBuyTraining(state, trainingId)) {
-      break;
-    }
-
-    const cost = getTrainingCost(state, trainingId);
-    state.player.gold = subtract(state.player.gold, cost);
-    state.training[trainingId].level += 1;
+  if (!target || !source || source.locked || target.itemId !== source.itemId || getItemLevel(target) >= maxItemLevel || getItemLevel(source) >= maxItemLevel) {
+    return refreshAchievements(state);
   }
 
-  return state;
+  target.level = Math.min(maxItemLevel, getItemLevel(target) + getItemLevel(source));
+  state.inventory.items.splice(sourceIndex, 1);
+
+  return refreshAchievements(state);
+}
+
+export function setItemLocked(input: GameState, instanceId: string, locked: boolean): GameState {
+  const state = cloneState(input);
+  const item = state.inventory.items.find((entry) => entry.instanceId === instanceId);
+
+  if (item) {
+    item.locked = locked;
+  }
+
+  return refreshAchievements(state);
+}
+
+export function setAutoSellDuplicates(input: GameState, enabled: boolean): GameState {
+  const state = cloneState(input);
+  state.inventory.autoSellDuplicates = state.unlocks.autoSellDuplicates ? enabled : false;
+  return refreshAchievements(state);
+}
+
+export function setActiveTraining(input: GameState, trainingId: TrainingId): GameState {
+  const state = cloneState(input);
+  getTrainingSpec(trainingId);
+  state.activeTrainingId = trainingId;
+  return refreshAchievements(state);
+}
+
+export function stopActiveTraining(input: GameState): GameState {
+  const state = cloneState(input);
+  state.activeTrainingId = undefined;
+  return refreshAchievements(state);
 }
 
 export function getSnapshot(state: GameState, content = gameContent): GameSnapshot {
@@ -401,6 +489,7 @@ export function getSnapshot(state: GameState, content = gameContent): GameSnapsh
   const boss = getMonster(content, currentArea.bossId);
   const currentTarget = state.hunt.targetMonsterId ? getMonster(content, state.hunt.targetMonsterId) : undefined;
   const stats = getHunterStats(state, content);
+  const gearScore = getItemGearScoreTotal(state.inventory.items, content.items, state.inventory.equipped);
   const combat = getCombatSnapshot(state, stats, currentTarget);
   const power = getHunterPower(stats);
   const survival = getHunterSurvival(stats);
@@ -416,6 +505,8 @@ export function getSnapshot(state: GameState, content = gameContent): GameSnapsh
   const features = getFeatureUnlocks(state, currentArea);
   const prestigeGain = getPrestigeGain(state);
   const capstoneCleared = hasPrestigeCapstoneCleared(state, content);
+  const visibleAchievements = achievementSpecs.filter((achievement) => !achievement.secret);
+  const secretAchievements = achievementSpecs.filter((achievement) => achievement.secret);
 
   return {
     state,
@@ -425,6 +516,7 @@ export function getSnapshot(state: GameState, content = gameContent): GameSnapsh
     combat,
     boss,
     stats,
+    gearScore,
     power,
     survival,
     hunterHp,
@@ -439,6 +531,16 @@ export function getSnapshot(state: GameState, content = gameContent): GameSnapsh
       nextRenown: getPrestigeRenownRequirement(prestigeGain + 1),
       statMultiplier: getPrestigeStatMultiplier(state),
       rewardMultiplier: getPrestigeRewardMultiplier(state)
+    },
+    achievements: {
+      completed: getCompletedAchievementCount(state),
+      visibleCompleted: visibleAchievements.filter((achievement) => state.achievements.records[achievement.id]?.completedAt !== undefined).length,
+      visibleTotal: visibleAchievements.length,
+      secretCompleted: secretAchievements.filter((achievement) => state.achievements.records[achievement.id]?.completedAt !== undefined).length,
+      secretTotal: secretAchievements.length,
+      secretTokens: state.achievements.secretTokens,
+      statMultiplier: getAchievementStatMultiplier(state),
+      rewardMultiplier: getAchievementRewardMultiplier(state)
     },
     features,
     unlockNotices: getUnlockNotices(features),
@@ -741,10 +843,11 @@ function awardMonster(
   const gold = floor(multiply(monster.gold, getRewardModifier(state, content, "goldFind")));
   const renown = gameNumber(monster.renown);
   const loot = rollLoot(state, monster.loot, content);
+  const totalGold = add(gold, loot.autoSoldGold);
   const progress = monster.role === "regular" ? Math.max(0, Math.min(monster.progress * getChallengeProgressMultiplier(state), area.progressRequired - areaState.progress)) : 0;
 
   state.player.xp = add(state.player.xp, xp);
-  state.player.gold = add(state.player.gold, gold);
+  state.player.gold = add(state.player.gold, totalGold);
   state.player.renown = add(state.player.renown, renown);
   state.hunt.huntsCompleted += monster.role === "regular" ? 1 : 0;
 
@@ -763,11 +866,13 @@ function awardMonster(
     monsterId: monster.id,
     monsterName: monster.name,
     xp,
-    gold,
+    gold: totalGold,
+    autoSoldGold: loot.autoSoldGold,
     renown,
     progress,
     resources: loot.resources,
     itemIds: loot.items.map((item) => item.itemId),
+    autoSoldItemIds: loot.autoSoldItemIds,
     at: state.updatedAt
   };
 
@@ -837,9 +942,11 @@ function rollLoot(
   state: GameState,
   lootTable: LootEntry[],
   content: GameContent
-): { resources: Record<string, ReturnType<typeof gameNumber>>; items: InventoryItem[] } {
+): { resources: Record<string, ReturnType<typeof gameNumber>>; items: InventoryItem[]; autoSoldGold: ReturnType<typeof gameNumber>; autoSoldItemIds: string[] } {
   const resources: Record<string, ReturnType<typeof gameNumber>> = {};
   const items: InventoryItem[] = [];
+  let autoSoldGold = gameNumber(0);
+  const autoSoldItemIds: string[] = [];
   const materialModifier = getRewardModifier(state, content, "materialFind");
 
   for (const loot of lootTable) {
@@ -852,15 +959,27 @@ function rollLoot(
       const amount = Math.max(1, Math.floor(randomInt(state, loot.min, loot.max) * materialModifier));
       resources[loot.resourceId] = add(resources[loot.resourceId] ?? 0, amount);
     } else {
+      const itemSpec = content.items.find((item) => item.id === loot.itemId);
+      const alreadyOwned = state.inventory.items.some((item) => item.itemId === loot.itemId)
+        || items.some((item) => item.itemId === loot.itemId);
+
+      if (state.unlocks.autoSellDuplicates && state.inventory.autoSellDuplicates && alreadyOwned && itemSpec) {
+        autoSoldGold = add(autoSoldGold, itemSpec.value);
+        autoSoldItemIds.push(loot.itemId);
+        continue;
+      }
+
       items.push({
         instanceId: `${loot.itemId}-${state.updatedAt}-${state.inventory.items.length + items.length}`,
         itemId: loot.itemId,
-        acquiredAt: state.updatedAt
+        acquiredAt: state.updatedAt,
+        level: 1,
+        locked: false
       });
     }
   }
 
-  return { resources, items };
+  return { resources, items, autoSoldGold, autoSoldItemIds };
 }
 
 function levelUp(state: GameState): void {
@@ -914,8 +1033,35 @@ function cloneState(state: GameState): GameState {
     ...createTrainingState(),
     ...cloned.training
   };
+  for (const trainingId of Object.keys(cloned.training) as TrainingId[]) {
+    cloned.training[trainingId] = {
+      level: Math.max(0, Math.floor(Number(cloned.training[trainingId]?.level ?? 0))),
+      progressSeconds: Math.max(0, Number(cloned.training[trainingId]?.progressSeconds ?? 0))
+    };
+  }
+  cloned.activeTrainingId = cloned.activeTrainingId && cloned.training[cloned.activeTrainingId]
+    ? cloned.activeTrainingId
+    : undefined;
   cloned.areas = normalizeAreaStates(cloned.areas);
+  cloned.inventory = {
+    ...fresh.inventory,
+    ...cloned.inventory,
+    equipped: {
+      ...fresh.inventory.equipped,
+      ...cloned.inventory?.equipped
+    },
+    autoSellDuplicates: Boolean(cloned.inventory?.autoSellDuplicates)
+  };
+  cloned.inventory.items = cloned.inventory.items.map((item) => ({
+    ...item,
+    level: getItemLevel(item),
+    locked: Boolean(item.locked)
+  }));
   cloned.time = reviveTimeState(cloned.time, cloned.updatedAt);
+  cloned.achievements = {
+    records: reviveAchievementRecords(cloned.achievements?.records),
+    secretTokens: Math.max(0, Math.floor(Number(cloned.achievements?.secretTokens ?? 0)))
+  };
   cloned.challenges = {
     records: reviveChallengeRecords(cloned.challenges?.records),
     active: cloned.challenges?.active && getChallengeSpec(cloned.challenges.active.challengeId)
@@ -929,6 +1075,7 @@ function cloneState(state: GameState): GameState {
         }
       : undefined
   };
+  cloned.settlement = reviveSettlementState(cloned.settlement);
   if (cloned.hunt.lastReward) {
     cloned.hunt.lastReward = reviveRewardSummary(cloned.hunt.lastReward);
   }
@@ -1029,7 +1176,9 @@ function reviveRewardSummary(reward: RewardSummary): RewardSummary {
     ...reward,
     xp: gameNumber(reward.xp),
     gold: gameNumber(reward.gold),
+    autoSoldGold: gameNumber(reward.autoSoldGold ?? 0),
     renown: gameNumber(reward.renown),
+    autoSoldItemIds: reward.autoSoldItemIds ?? [],
     resources: Object.fromEntries(
       Object.entries(reward.resources ?? {}).map(([resourceId, amount]) => [resourceId, gameNumber(amount)])
     )
@@ -1045,6 +1194,50 @@ function createTimeState(now: number): TimeState {
     lastOfflineSeconds: 0,
     lastBankedSeconds: 0
   };
+}
+
+function createSettlementState(): SettlementState {
+  return {
+    foundedAtPrestige: undefined,
+    seasonsPassed: 0,
+    population: 0,
+    stores: 0,
+    outpostScouts: 0,
+    forgeHeat: 0
+  };
+}
+
+function reviveSettlementState(settlement: Partial<SettlementState> | undefined): SettlementState {
+  const fresh = createSettlementState();
+
+  return {
+    foundedAtPrestige: settlement?.foundedAtPrestige === undefined
+      ? fresh.foundedAtPrestige
+      : Math.max(1, Math.floor(Number(settlement.foundedAtPrestige))),
+    seasonsPassed: Math.max(0, Math.floor(Number(settlement?.seasonsPassed ?? fresh.seasonsPassed))),
+    population: Math.max(0, Math.floor(Number(settlement?.population ?? fresh.population))),
+    stores: Math.max(0, Math.floor(Number(settlement?.stores ?? fresh.stores))),
+    outpostScouts: Math.max(0, Math.floor(Number(settlement?.outpostScouts ?? fresh.outpostScouts))),
+    forgeHeat: Math.max(0, Math.floor(Number(settlement?.forgeHeat ?? fresh.forgeHeat)))
+  };
+}
+
+function advanceSettlementForPrestige(settlement: SettlementState | undefined, totalPrestige: number, prestigeGain: number): SettlementState {
+  const next = reviveSettlementState(settlement);
+  const seasonsGained = Math.max(1, Math.floor(prestigeGain));
+
+  if (totalPrestige <= 0) {
+    return next;
+  }
+
+  next.foundedAtPrestige ??= totalPrestige;
+  next.seasonsPassed += seasonsGained;
+  next.population += seasonsGained * 3 + Math.floor(totalPrestige / 2);
+  next.stores += seasonsGained * 2;
+  next.outpostScouts += seasonsGained;
+  next.forgeHeat += seasonsGained * 2 + Math.floor(totalPrestige / 3);
+
+  return next;
 }
 
 function reviveTimeState(time: Partial<TimeState> | undefined, fallbackSeenAt: number): TimeState {
